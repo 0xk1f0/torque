@@ -1,6 +1,6 @@
-# ABOUTME: Builds the spec-v2 Sendspin client (sendspin-v2-player) for every
+# ABOUTME: Builds the encrypted Sendspin client (sendspin-client) for every
 # ABOUTME: Raspberry Pi architecture, including armv6 for Pi 1 / Zero / Zero W.
-name: v2 client (Raspberry Pi)
+name: sendspin-client (Raspberry Pi)
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
   # need a C cross toolchain plus per-architecture libopus/ALSA. arm64 runs
   # natively on GitHub's arm runners; arm32 is cross-compiled from x86_64.
   test:
-    name: Test v2 client
+    name: Test sendspin client
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
         sudo apt-get install -y libopus-dev libasound2-dev
 
     - name: Vet
-      run: go vet ./pkg/... ./cmd/sendspin-v2-player/...
+      run: go vet ./pkg/... ./cmd/sendspin-client/...
 
     - name: Run v2 client + protocol tests
       run: go test -race -count=1 ./pkg/sendspin/... ./pkg/protocol/...
@@ -121,19 +121,19 @@ jobs:
         [ -n "${{ matrix.cgo_cflags }}" ] && export CGO_CFLAGS="${{ matrix.cgo_cflags }}" CGO_LDFLAGS="${{ matrix.cgo_cflags }}"
         LDFLAGS="-X github.com/Sendspin/sendspin-go/internal/version.Version=${{ steps.version.outputs.VERSION }} -s -w"
         go build -trimpath -ldflags "${LDFLAGS}" \
-          -o sendspin-v2-player-${{ matrix.name }} ./cmd/sendspin-v2-player
+          -o sendspin-client-${{ matrix.name }} ./cmd/sendspin-client
 
     # Assert the produced ELF really is the advertised ARM architecture —
     # catches the armv7-compiled-cgo-on-armv6 trap before it reaches a Zero W.
     - name: Verify architecture
       run: |
-        file sendspin-v2-player-${{ matrix.name }}
+        file sendspin-client-${{ matrix.name }}
         if [ "${{ matrix.goarch }}" = "arm" ]; then
-          readelf -A sendspin-v2-player-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
+          readelf -A sendspin-client-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
         fi
 
     - name: Upload v2 client
       uses: actions/upload-artifact@v4
       with:
-        name: sendspin-v2-player-${{ matrix.name }}
-        path: sendspin-v2-player-${{ matrix.name }}
+        name: sendspin-client-${{ matrix.name }}
+        path: sendspin-client-${{ matrix.name }}

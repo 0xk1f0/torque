@@ -1,4 +1,4 @@
-// ABOUTME: Entry point for the spec-v2 Sendspin player
+// ABOUTME: Entry point for the Sendspin client
 // ABOUTME: Thin CLI wrapper around pkg/sendspin.PlayerV2 on the encrypted wire
 //
 // Runtime dependencies on a Raspberry Pi: libopus0 and ALSA (install
@@ -28,7 +28,7 @@ import (
 
 var (
 	serverAddr     = flag.String("server", "", "Server address (host:port), e.g. 192.168.1.10:8927")
-	name           = flag.String("name", "", "Player friendly name (default: hostname-sendspin-v2-player)")
+	name           = flag.String("name", "", "Player friendly name (default: hostname-sendspin-client)")
 	identityPath   = flag.String("identity", defaultIdentityPath(), "Path to the client identity key (generated on first run, 0600)")
 	bufferMs       = flag.Int("buffer-ms", 500, "Playback buffer size in milliseconds")
 	outputDelayMs  = flag.Int("output-delay-ms", 0, "output_delay_ms reported to the server (0-5000)")
