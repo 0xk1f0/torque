@@ -1,0 +1,130 @@
+# ABOUTME: Builds the spec-v2 Sendspin client (sendspin-v2-player) for every
+# ABOUTME: Raspberry Pi architecture, including armv6 for Pi 1 / Zero / Zero W.
+name: v2 client (Raspberry Pi)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Same tag as the other workflows: skip the libopusfile parts of
+# gopkg.in/hraban/opus.v2 so the binary does not link libopusfile at runtime.
+env:
+  GOFLAGS: -tags=nolibopusfile
+
+jobs:
+  # The v2 client uses libopus (cgo) and miniaudio (cgo), so the cross builds
+  # need a C cross toolchain plus per-architecture libopus/ALSA. arm64 runs
+  # natively on GitHub's arm runners; arm32 is cross-compiled from x86_64.
+  test:
+    name: Test v2 client
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libopus-dev libasound2-dev
+
+    - name: Vet
+      run: go vet ./pkg/... ./cmd/sendspin-v2-player/...
+
+    - name: Run v2 client + protocol tests
+      run: go test -race -count=1 ./pkg/sendspin/... ./pkg/protocol/...
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 64-bit Pi OS — native arm64 runner, host gcc + host deps.
+          - name: linux-arm64        # Pi 3 / Pi 4 / Pi 5 / Pi Zero 2 W (64-bit OS)
+            runner: ubuntu-24.04-arm
+            goarch: arm64
+            goarm: ""
+            cc: ""
+            pkgconfig: ""
+            cgo_cflags: ""
+            multiarch: "false"
+          # 32-bit Raspbian — cross-compiled from x86_64. The C parts (miniaudio,
+          # opus) MUST be compiled for the target too, hence CGO_CFLAGS per cell;
+          # GOARM alone only affects the Go code and an armv7-built miniaudio
+          # would crash on an armv6 CPU.
+          - name: linux-armv7        # Pi 2 / Pi 3 (32-bit Raspbian)
+            runner: ubuntu-latest
+            goarch: arm
+            goarm: "7"
+            cc: arm-linux-gnueabihf-gcc
+            pkgconfig: /usr/lib/arm-linux-gnueabihf/pkgconfig
+            cgo_cflags: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard
+            multiarch: "true"
+          - name: linux-armv6        # Pi 1 / Pi Zero / Pi Zero W
+            runner: ubuntu-latest
+            goarch: arm
+            goarm: "6"
+            cc: arm-linux-gnueabihf-gcc
+            pkgconfig: /usr/lib/arm-linux-gnueabihf/pkgconfig
+            cgo_cflags: -march=armv6 -mfpu=vfp -mfloat-abi=hard
+            multiarch: "true"
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+
+    - name: Install dependencies (arm64 native)
+      if: matrix.goarch == 'arm64'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libopus-dev libasound2-dev
+
+    # armhf multiarch: enables the arm-linux-gnueabihf cross gcc to find
+    # libopus + ALSA headers/libs for the 32-bit target.
+    - name: Install cross toolchain + deps (arm32)
+      if: matrix.goarch == 'arm'
+      run: |
+        sudo dpkg --add-architecture armhf
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-linux-gnueabihf libopus-dev:armhf libasound2-dev:armhf
+
+    - name: Get version
+      id: version
+      run: echo "VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> $GITHUB_OUTPUT
+
+    - name: Build
+      run: |
+        export CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }}
+        [ -n "${{ matrix.cc }}" ]         && export CC=${{ matrix.cc }}
+        [ -n "${{ matrix.pkgconfig }}" ]  && export PKG_CONFIG_PATH=${{ matrix.pkgconfig }}
+        [ -n "${{ matrix.cgo_cflags }}" ] && export CGO_CFLAGS="${{ matrix.cgo_cflags }}" CGO_LDFLAGS="${{ matrix.cgo_cflags }}"
+        LDFLAGS="-X github.com/Sendspin/sendspin-go/internal/version.Version=${{ steps.version.outputs.VERSION }} -s -w"
+        go build -trimpath -ldflags "${LDFLAGS}" \
+          -o sendspin-v2-player-${{ matrix.name }} ./cmd/sendspin-v2-player
+
+    # Assert the produced ELF really is the advertised ARM architecture —
+    # catches the armv7-compiled-cgo-on-armv6 trap before it reaches a Zero W.
+    - name: Verify architecture
+      run: |
+        file sendspin-v2-player-${{ matrix.name }}
+        if [ "${{ matrix.goarch }}" = "arm" ]; then
+          readelf -A sendspin-v2-player-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
+        fi
+
+    - name: Upload v2 client
+      uses: actions/upload-artifact@v4
+      with:
+        name: sendspin-v2-player-${{ matrix.name }}
+        path: sendspin-v2-player-${{ matrix.name }}
