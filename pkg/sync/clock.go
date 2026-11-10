@@ -136,15 +136,18 @@ func (cs *ClockSync) CheckQuality() Quality {
 }
 
 // TimeSinceLastSync returns how long ago the most recent successful sync
-// response was processed, using the configured clock, without mutating quality.
+// response was processed, using the configured clock. Readers can use this
+// without mutating quality, e.g. to decide when a lost sync warrants a
+// graceful-degradation action after CheckQuality has reported QualityLost.
 func (cs *ClockSync) TimeSinceLastSync() time.Duration {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.now().Sub(cs.lastSync)
 }
 
-// Synced reports whether the time filter has processed at least one
-// measurement (an established baseline, as opposed to never synced).
+// Synced reports whether the underlying time filter has processed at least
+// one measurement (i.e. there is an established sync baseline, as opposed to
+// a receiver that has never synced).
 func (cs *ClockSync) Synced() bool {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

@@ -28,18 +28,6 @@ import (
 // V2TimeSyncBurstSize is the clock-sync burst size (spec: ≥8 per burst).
 const V2TimeSyncBurstSize = 8
 
-// Graceful-degradation sentinel errors (shared semantics with the legacy
-// Receiver; also delivered via V2Config.OnError).
-var (
-	// ErrSyncLost is reported when clock-sync quality has been lost past the
-	// grace window; playback pauses until recovery.
-	ErrSyncLost = errors.New("clock sync lost: playback paused")
-	// ErrSyncRecovered is reported when sync resumes after a loss.
-	ErrSyncRecovered = errors.New("clock sync recovered: playback resumed")
-	// ErrConnectionLost is reported when the encrypted connection drops.
-	ErrConnectionLost = errors.New("server connection lost")
-)
-
 // Defaults for clock-sync loss monitoring on the v2 client (see V2Config).
 const (
 	defaultV2SyncMonitorInterval = 500 * time.Millisecond

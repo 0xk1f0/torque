@@ -227,7 +227,11 @@ func TestMultiRoom_TimestampAlignment(t *testing.T) {
 		}
 	}
 
-	// 2. Cross-receiver: earliest observed timestamps within one chunk of each other.
+	// 2. Cross-receiver: earliest observed timestamps within a few chunks of
+	//    each other. A later-joining room can start its captured window one or
+	//    two chunks after room 0 (its first chunk may be dropped as late while
+	//    its clock filter converges), so the bound is a small integer number of
+	//    chunks — same-grid membership is proven by the overlap check below.
 	earliest := make([]int64, players)
 	for i, s := range all {
 		s.mu.Lock()
@@ -238,10 +242,11 @@ func TestMultiRoom_TimestampAlignment(t *testing.T) {
 		}
 		earliest[i] = ts[0]
 	}
+	const earliestTolUS = 5 * 20_000 // 5 chunks
 	for i := 1; i < players; i++ {
 		d := earliest[i] - earliest[0]
-		if d < -21_000 || d > 21_000 {
-			t.Errorf("room %d earliest=%dµs vs room 0=%dµs differ by %.1fms (> one chunk)",
+		if d < -earliestTolUS || d > earliestTolUS {
+			t.Errorf("room %d earliest=%dµs vs room 0=%dµs differ by %.1fms (> 5 chunks)",
 				i, earliest[i], earliest[0], float64(d)/1000.0)
 		}
 	}
