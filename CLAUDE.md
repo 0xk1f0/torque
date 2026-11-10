@@ -79,7 +79,7 @@ The legacy `internal/{app,artwork,audio,client,player,protocol,sync}` packages w
 
 ## Code Style
 
-- Go ≥1.24. Module path is `github.com/Sendspin/sendspin-go`.
+- Go ≥1.27. Module path is `github.com/Sendspin/sendspin-go`.
 - Every `.go` file starts with two `// ABOUTME:` header lines summarizing its purpose. Match this on new files.
 - Linting: golangci-lint with gosimple, govet, ineffassign, unused, gofmt, goimports, misspell, errcheck enabled; staticcheck intentionally disabled.
 - Conventional commits: `type(scope): subject` (`feat`, `fix`, `refactor`, `test`, `chore`, `docs`, `style`, `build`, `ci`).
