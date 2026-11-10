@@ -242,6 +242,10 @@ func (r *Receiver) Connect() error {
 			ProductName:     r.config.DeviceInfo.ProductName,
 			Manufacturer:    r.config.DeviceInfo.Manufacturer,
 			SoftwareVersion: r.config.DeviceInfo.SoftwareVersion,
+			// Advertise the primary interface MAC per spec so controllers can
+			// recognise the device independent of client_id. Additive and
+			// optional; kept empty when no stable MAC can be picked.
+			MACAddress: pickStableMACOrEmpty(),
 		},
 		PlayerV1Support: protocol.PlayerV1Support{
 			SupportedFormats:  supportedFormats,

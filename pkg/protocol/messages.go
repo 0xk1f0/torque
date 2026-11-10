@@ -35,6 +35,11 @@ type DeviceInfo struct {
 	ProductName     string `json:"product_name"`
 	Manufacturer    string `json:"manufacturer"`
 	SoftwareVersion string `json:"software_version"`
+	// MACAddress is the lowercase colon-separated MAC of the network interface
+	// the connection is opened on (aa:bb:cc:dd:ee:ff). Per spec this is the
+	// versioned handshake's device_info.mac_address; additive and optional on
+	// the legacy path so older peers ignore it.
+	MACAddress string `json:"mac_address,omitempty"`
 }
 
 // PlayerV1Support describes player@v1 capabilities per spec

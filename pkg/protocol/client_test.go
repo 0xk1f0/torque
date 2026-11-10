@@ -771,3 +771,44 @@ func TestHandshake_PlayerSupportGatedByRoles(t *testing.T) {
 		})
 	}
 }
+
+// TestForwardCompat_IgnoresUnknownJSON locks in the spec's forward-compat
+// rule ("Clients and servers MUST ignore JSON messages with an unrecognized
+// type ... MUST ignore unrecognized payload fields"): a future peer may send
+// message types and fields this implementation does not know about without
+// breaking the connection or the recognized messages around them.
+func TestForwardCompat_IgnoresUnknownJSON(t *testing.T) {
+	client := NewClient(Config{ServerAddr: "localhost:0", ClientID: "fc", Name: "fc"})
+
+	// 1. Unrecognized message type (valid envelope shape) must be ignored,
+	//    not error, and not route onto a known channel.
+	client.handleJSONMessage([]byte(`{"type":"future/message","payload":{"anything":1}}`))
+	select {
+	case <-client.GroupUpdate:
+		t.Fatal("unknown message type was routed to GroupUpdate")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	// 2. A recognized message carrying undefined fields must still decode
+	//    (Go ignores unknown JSON keys), and the defined fields must route.
+	client.handleJSONMessage([]byte(`{
+		"type": "group/update",
+		"payload": {
+			"group_id": "g-1",
+			"group_name": "Kitchen",
+			"playback_state": "playing",
+			"future_field_that_must_be_ignored": [1,2,3]
+		}
+	}`))
+	select {
+	case gu := <-client.GroupUpdate:
+		if gu.GroupID == nil || *gu.GroupID != "g-1" {
+			t.Errorf("GroupID = %v, want g-1", gu.GroupID)
+		}
+		if gu.PlaybackState == nil || *gu.PlaybackState != "playing" {
+			t.Errorf("PlaybackState = %v, want playing", gu.PlaybackState)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("recognized message with unknown fields was not routed")
+	}
+}

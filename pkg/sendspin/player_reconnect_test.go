@@ -124,8 +124,8 @@ func TestPlayer_ReconnectLoop_ReconnectsAfterServerRestart(t *testing.T) {
 	// startTestServer binds an ephemeral port, publishes its address into
 	// currentAddr, and registers an idempotent stop for cleanup.
 	type managedServer struct {
-		srv *Server
-		err chan error
+		srv  *Server
+		err  chan error
 		once sync.Once
 	}
 	starts := make([]*managedServer, 0, 2)

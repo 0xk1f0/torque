@@ -570,6 +570,8 @@ Found a bug or have a feature request? Please check existing issues or create a 
 
 ### Recently Shipped
 
+**Stability + protocol audit** — graceful clock-sync-loss degradation, verified reconnection/backoff, server clean shutdown with live clients, leak/soak/stress/multi-room tests, and a full protocol-compliance audit against `Sendspin/spec` in `docs/SPEC_COMPLIANCE.md`
+
 **v1.2.0** — drop the oto backend and unify on malgo for true 24-bit output (see [#3](https://github.com/Sendspin/sendspin-go/issues/3) and [#26](https://github.com/Sendspin/sendspin-go/pull/26))
 
 **v1.1.0** — server-initiated client discovery, Kalman clock filter, code-path audit
@@ -578,10 +580,10 @@ Found a bug or have a feature request? Please check existing issues or create a 
 
 **Protocol & compatibility:**
 
-- [ ] Validate all message types match latest Sendspin Protocol spec
+- [x] Validate all message types match the latest Sendspin Protocol spec — audited against [`Sendspin/spec`](https://github.com/Sendspin/spec) in [`docs/SPEC_COMPLIANCE.md`](docs/SPEC_COMPLIANCE.md): legacy track frozen for MA compatibility (documented), spec-v2 track drift (send_ahead, from_timestamp, field renames, `trust_level`) catalogued with severities
 - [ ] Test with additional Sendspin-compatible servers beyond Music Assistant
-- [ ] Document protocol extensions or deviations
-- [ ] Explicit protocol-version negotiation (versioned roles like `player@v1` exist; a numeric version handshake does not)
+- [x] Document protocol extensions or deviations — see [`docs/SPEC_COMPLIANCE.md` §1.2](docs/SPEC_COMPLIANCE.md)
+- [x] Explicit protocol-version negotiation — resolved: versioned roles (`role@vN`) are the negotiation; the current spec defines a hard `version: 1` gate in `client/init`, not a numeric handshake (see [`docs/SPEC_COMPLIANCE.md`](docs/SPEC_COMPLIANCE.md))
 
 **Audio:**
 
@@ -593,10 +595,10 @@ Found a bug or have a feature request? Please check existing issues or create a 
 
 **Stability:**
 
-- [ ] Reconnection handling and automatic retry
-- [ ] Graceful degradation on clock sync loss
-- [ ] Memory leak testing for long-running sessions
-- [ ] Stress testing with many clients and multi-room sync accuracy with 5+ players
+- [x] Reconnection handling and automatic retry — `Player.Reconnect` with jittered exponential backoff, max attempts, and rediscovery; verified end-to-end (server drop → reconnecting → reconnect) in `player_reconnect_test.go`
+- [x] Graceful degradation on clock sync loss — playback pauses with `ErrSyncLost` after a configurable grace and resumes with `ErrSyncRecovered` (`receiver_sync_test.go`)
+- [x] Memory leak testing for long-running sessions — goroutine-hygiene test on connection drop plus a connect/stream/close soak asserting bounded heap and goroutines (`stress_test.go`)
+- [x] Stress testing with many clients and multi-room sync accuracy with 5+ players — 16 concurrent clients and 5-player timestamp-alignment harnesses (`stress_test.go`)
 
 **Features:**
 
@@ -629,6 +631,12 @@ Found a bug or have a feature request? Please check existing issues or create a 
 
 Implements the [Sendspin Protocol](https://github.com/Sendspin/spec) specification.
 
+> **Compliance** — message types are audited against the current spec in
+> [`docs/SPEC_COMPLIANCE.md`](docs/SPEC_COMPLIANCE.md). The shipped (`main`)
+> protocol is the legacy Music-Assistant-compatible profile (frozen); the
+> encrypted spec-v2 profile lives on the unreleased `feat/spec-v2` branch,
+> whose drift vs today's spec is catalogued in the same document.
+
 **Implementation Status:**
 
 - ✅ WebSocket transport
@@ -640,5 +648,6 @@ Implements the [Sendspin Protocol](https://github.com/Sendspin/spec) specificati
 - ✅ Multi-codec support (Opus with server-side resampling, 24-bit PCM)
 - ✅ True 24-bit audio output via malgo (v1.2.0)
 - ✅ Server-initiated client discovery (v1.1.0)
+- ✅ Graceful degradation on clock-sync loss + verified automatic reconnect (stability pass)
 - ⚠️ Album artwork — downloader exists, not fully wired through to all TUI surfaces
 - ⚠️ Visualizer role (planned)
