@@ -1,5 +1,6 @@
 # ABOUTME: Builds the encrypted Sendspin client (sendspin-client) for every
-# ABOUTME: Raspberry Pi architecture, including armv6 for Pi 1 / Zero / Zero W.
+# ABOUTME: Raspberry Pi architecture plus desktop x86_64, including armv6 for
+# ABOUTME: Pi 1 / Zero / Zero W. All cells cross-compile on a single runner.
 name: sendspin-client (Raspberry Pi)
 
 on:
@@ -15,9 +16,13 @@ env:
   GOFLAGS: -tags=nolibopusfile
 
 jobs:
-  # The v2 client uses libopus (cgo) and miniaudio (cgo), so the cross builds
-  # need a C cross toolchain plus per-architecture libopus/ALSA. arm64 runs
-  # natively on GitHub's arm runners; arm32 is cross-compiled from x86_64.
+  # sendspin-client uses libopus (cgo) and miniaudio (cgo), so the cross cells
+  # need a C cross toolchain plus per-architecture libopus/ALSA. Everything is
+  # cross-compiled from one ubuntu-latest runner: amd64 is host-native, arm64
+  # uses the aarch64-linux-gnu toolchain, and arm32 uses the gnueabihf
+  # toolchain. Per-cell CGO_CFLAGS select the exact -march: GOARM alone only
+  # affects the Go code, and an armv7-built miniaudio would crash on an armv6
+  # CPU (Pi Zero / Zero W).
   test:
     name: Test sendspin client
     runs-on: ubuntu-latest
@@ -41,49 +46,43 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: test
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Desktop x86_64 — native host gcc + host deps.
+          # Desktop x86_64 — host-native, no cross toolchain.
           - name: linux-amd64
-            runner: ubuntu-latest
             goarch: amd64
             goarm: ""
             cc: ""
             pkgconfig: ""
             cgo_cflags: ""
-            multiarch: "false"
-          # 64-bit Pi OS — native arm64 runner, host gcc + host deps.
-          - name: linux-arm64        # Pi 3 / Pi 4 / Pi 5 / Pi Zero 2 W (64-bit OS)
-            runner: ubuntu-24.04-arm
+            deps: native
+          # 64-bit Pi OS (Pi 3/4/5, Zero 2 W) — cross aarch64.
+          - name: linux-arm64
             goarch: arm64
             goarm: ""
-            cc: ""
-            pkgconfig: ""
+            cc: aarch64-linux-gnu-gcc
+            pkgconfig: /usr/lib/aarch64-linux-gnu/pkgconfig
             cgo_cflags: ""
-            multiarch: "false"
-          # 32-bit Raspbian — cross-compiled from x86_64. The C parts (miniaudio,
-          # opus) MUST be compiled for the target too, hence CGO_CFLAGS per cell;
-          # GOARM alone only affects the Go code and an armv7-built miniaudio
-          # would crash on an armv6 CPU.
-          - name: linux-armv7        # Pi 2 / Pi 3 (32-bit Raspbian)
-            runner: ubuntu-latest
+            deps: aarch64
+          # 32-bit Raspbian (Pi 2/3) — cross gnueabihf, armv7 C code.
+          - name: linux-armv7
             goarch: arm
             goarm: "7"
             cc: arm-linux-gnueabihf-gcc
             pkgconfig: /usr/lib/arm-linux-gnueabihf/pkgconfig
             cgo_cflags: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard
-            multiarch: "true"
-          - name: linux-armv6        # Pi 1 / Pi Zero / Pi Zero W
-            runner: ubuntu-latest
+            deps: gnueabihf
+          # Pi 1 / Pi Zero / Pi Zero W — cross gnueabihf, armv6 C code.
+          - name: linux-armv6
             goarch: arm
             goarm: "6"
             cc: arm-linux-gnueabihf-gcc
             pkgconfig: /usr/lib/arm-linux-gnueabihf/pkgconfig
             cgo_cflags: -march=armv6 -mfpu=vfp -mfloat-abi=hard
-            multiarch: "true"
+            deps: gnueabihf
 
     steps:
     - uses: actions/checkout@v4
@@ -94,16 +93,22 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Install dependencies (native)
-      if: matrix.goarch != 'arm'
+    - name: Install dependencies (native amd64)
+      if: matrix.deps == 'native'
       run: |
         sudo apt-get update
         sudo apt-get install -y libopus-dev libasound2-dev
 
-    # armhf multiarch: enables the arm-linux-gnueabihf cross gcc to find
-    # libopus + ALSA headers/libs for the 32-bit target.
-    - name: Install cross toolchain + deps (arm32)
-      if: matrix.goarch == 'arm'
+    # Multiarch enables the cross gcc to find target libopus + ALSA headers/libs.
+    - name: Install cross toolchain + deps (aarch64)
+      if: matrix.deps == 'aarch64'
+      run: |
+        sudo dpkg --add-architecture arm64
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu libopus-dev:arm64 libasound2-dev:arm64
+
+    - name: Install cross toolchain + deps (armhf)
+      if: matrix.deps == 'gnueabihf'
       run: |
         sudo dpkg --add-architecture armhf
         sudo apt-get update
@@ -123,8 +128,8 @@ jobs:
         go build -trimpath -ldflags "${LDFLAGS}" \
           -o sendspin-client-${{ matrix.name }} ./cmd/sendspin-client
 
-    # Assert the produced ELF really is the advertised ARM architecture —
-    # catches the armv7-compiled-cgo-on-armv6 trap before it reaches a Zero W.
+    # Assert the produced ELF really is the advertised architecture — catches
+    # the armv7-compiled-cgo-on-armv6 trap before it reaches a Zero W.
     - name: Verify architecture
       run: |
         file sendspin-client-${{ matrix.name }}
@@ -132,7 +137,7 @@ jobs:
           readelf -A sendspin-client-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
         fi
 
-    - name: Upload v2 client
+    - name: Upload sendspin client
       uses: actions/upload-artifact@v4
       with:
         name: sendspin-client-${{ matrix.name }}
