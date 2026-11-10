@@ -12,7 +12,7 @@ engine/TUI, discovery, and the legacy player) has been stripped.
   authenticated and confidential end-to-end over plain `ws://`.
 - **Spec-conformant session** — role negotiation, `server/activate`
   admissibility, `available`-based streaming, metadata, and control commands
-  audited against the current spec (`docs/SPEC_COMPLIANCE.md`).
+  audited against the current spec (see [Protocol conformance](#protocol-conformance)).
 - **Hi-res audio** — 24-bit PCM/FLAC and Opus decoding, precise microsecond
   clock sync via a Kalman time filter.
 - **Library-first** — use `PlayerV2` for out-of-the-box playback, `ReceiverV2`
@@ -132,7 +132,38 @@ make test
 make lint
 ```
 
-Protocol conformance is documented in `docs/SPEC_COMPLIANCE.md`.
+## Protocol conformance
+
+The client is conformed against the
+[Sendspin Protocol](https://github.com/Sendspin/spec)
+(bl: `c281aeb`, 2026-11-09) — every wire message it speaks was audited
+field-by-field against the spec.
+
+Implemented and tested:
+
+- **Transport** (`pkg/protocol/secure`): Noise `KKpsk2` client (responder)
+  handshake, both cipher suites, `psk_category`-aware PSK selection with
+  Sentinel fallback on an initial-handshake lookup miss, type-1 flag
+  fragmentation, identities and `SP:` pairing tokens, re-handshake responder.
+- **Session** (`pkg/protocol/session`): `client/hello` roles, `server/activate`
+  admissibility, `client/state.available` on every message (initial
+  `client/state` only after clock sync), `stream/start`/`clear`/`end` (incl.
+  `from_timestamp`), metadata/controller `server/state`, player
+  `server/command`, `server/unpair`.
+- **Audio** (`pkg/protocol/playback`): 13-byte player-audio header
+  (`type` + `timestamp` + `send_ahead`; `send_ahead` ignored for scheduling
+  and saturation values not used as samples), 20 ms chunks inside the
+  15–150 ms bound, pcm/opus/flac decoding.
+- **Client** (`pkg/sendspin`, `pkg/sync`): Kalman time filter, clock-sync
+  bursts, `output_delay_ms` scheduling, graceful degradation on sync loss,
+  reconnect/backoff.
+
+Known limitation: the server-side Sentinel credential-mismatch re-verify is a
+server concern (not shipped here); the client implements the matching fallback
+and exposes pairing-record resolution via `V2Config.ResolvePSK`.
+
+Conformance is enforced by `go test ./...` (protocol + client suites) and the
+cross-platform build matrix in `.github/workflows/v2-client.yml`.
 
 ## License
 
