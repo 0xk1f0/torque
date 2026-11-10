@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio"
 	"github.com/mewkiz/flac"
 )
 

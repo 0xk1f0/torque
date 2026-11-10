@@ -5,7 +5,7 @@
 
 # Version from git tag or default
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -X github.com/Sendspin/sendspin-go/internal/version.Version=$(VERSION)
+LDFLAGS := -X github.com/0xk1f0/spinsync/internal/version.Version=$(VERSION)
 
 # Build with -tags=nolibopusfile so gopkg.in/hraban/opus.v2 doesn't link
 # libopusfile at runtime. The client never uses the opus.Stream API.
@@ -17,8 +17,8 @@ all: build
 
 # Build the client for the host platform
 build:
-	@echo "Building sendspin-client..."
-	go build -ldflags "$(LDFLAGS)" -o sendspin-client ./cmd/sendspin-client
+	@echo "Building spinsync..."
+	go build -ldflags "$(LDFLAGS)" -o spinsync ./cmd/spinsync
 
 # Cross-build for Linux on every Raspberry Pi architecture + x86_64 (the same
 # matrix as .github/workflows/v2-client.yml). Optional; Docker is the
@@ -30,19 +30,19 @@ build-cross:
 		case "$$arch" in \
 		arm) cc="arm-linux-gnueabihf-gcc"; flags="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"; \
 		     [ "$$arm" = "6" ] && flags="-march=armv6 -mfpu=vfp -mfloat-abi=hard"; \
-		     out="sendspin-client-linux-arm$$arm"; \
+		     out="spinsync-linux-arm$$arm"; \
 		     echo "  $$out ($$flags)"; \
 		     GOOS=linux GOARCH=arm GOARM=$$arm CC=$$cc \
 		       CGO_CFLAGS="$$flags" CGO_LDFLAGS="$$flags" \
 		       PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig \
-		       go build -ldflags "$(LDFLAGS)" -o bin/$$out ./cmd/sendspin-client ;; \
-		arm64) echo "  sendspin-client-linux-arm64"; \
+		       go build -ldflags "$(LDFLAGS)" -o bin/$$out ./cmd/spinsync ;; \
+		arm64) echo "  spinsync-linux-arm64"; \
 		       GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
 		       PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-		       go build -ldflags "$(LDFLAGS)" -o bin/sendspin-client-linux-arm64 ./cmd/sendspin-client ;; \
-		*) echo "  sendspin-client-linux-amd64"; \
+		       go build -ldflags "$(LDFLAGS)" -o bin/spinsync-linux-arm64 ./cmd/spinsync ;; \
+		*) echo "  spinsync-linux-amd64"; \
 		   GOOS=linux GOARCH=amd64 \
-		     go build -ldflags "$(LDFLAGS)" -o bin/sendspin-client-linux-amd64 ./cmd/sendspin-client ;; \
+		     go build -ldflags "$(LDFLAGS)" -o bin/spinsync-linux-amd64 ./cmd/spinsync ;; \
 		esac; \
 	done
 
@@ -71,47 +71,47 @@ lint:
 # Clean built binaries and artifacts
 clean:
 	@echo "Cleaning binaries and artifacts..."
-	rm -f sendspin-client
+	rm -f spinsync
 	rm -rf bin/
 	rm -f coverage.out coverage.html
 
 # Install the client to GOPATH/bin
 install:
-	@echo "Installing sendspin-client..."
-	go install -ldflags "$(LDFLAGS)" ./cmd/sendspin-client
+	@echo "Installing spinsync..."
+	go install -ldflags "$(LDFLAGS)" ./cmd/spinsync
 
-# Install sendspin-client as a systemd service (Linux, requires root)
+# Install spinsync as a systemd service (Linux, requires root)
 install-daemon: build
-	@echo "Installing sendspin-client service..."
-	install -m 755 sendspin-client /usr/local/bin/sendspin-client
-	install -m 644 dist/systemd/sendspin-client.service /etc/systemd/system/sendspin-client.service
-	@if [ ! -f /etc/default/sendspin-client ]; then \
-		install -m 644 dist/systemd/sendspin-client.env /etc/default/sendspin-client; \
-		echo "Created /etc/default/sendspin-client — edit this file to configure."; \
+	@echo "Installing spinsync service..."
+	install -m 755 spinsync /usr/local/bin/spinsync
+	install -m 644 dist/systemd/spinsync.service /etc/systemd/system/spinsync.service
+	@if [ ! -f /etc/default/spinsync ]; then \
+		install -m 644 dist/systemd/spinsync.env /etc/default/spinsync; \
+		echo "Created /etc/default/spinsync — edit this file to configure."; \
 	else \
-		echo "/etc/default/sendspin-client already exists, not overwriting."; \
+		echo "/etc/default/spinsync already exists, not overwriting."; \
 	fi
 	systemctl daemon-reload
 	@echo ""
 	@echo "Installed. To start:"
-	@echo "  sudo systemctl enable --now sendspin-client"
+	@echo "  sudo systemctl enable --now spinsync"
 	@echo ""
-	@echo "Configure via /etc/default/sendspin-client"
+	@echo "Configure via /etc/default/spinsync"
 
-# Remove the sendspin-client systemd service
+# Remove the spinsync systemd service
 uninstall-daemon:
-	@echo "Removing sendspin-client service..."
-	-systemctl stop sendspin-client 2>/dev/null
-	-systemctl disable sendspin-client 2>/dev/null
-	rm -f /etc/systemd/system/sendspin-client.service
-	rm -f /usr/local/bin/sendspin-client
+	@echo "Removing spinsync service..."
+	-systemctl stop spinsync 2>/dev/null
+	-systemctl disable spinsync 2>/dev/null
+	rm -f /etc/systemd/system/spinsync.service
+	rm -f /usr/local/bin/spinsync
 	systemctl daemon-reload
-	@echo "Removed. /etc/default/sendspin-client left in place (manual cleanup if desired)."
+	@echo "Removed. /etc/default/spinsync left in place (manual cleanup if desired)."
 
 help:
 	@echo "Sendspin Client - Build Targets"
 	@echo ""
-	@echo "  make              - Build sendspin-client"
+	@echo "  make              - Build spinsync"
 	@echo "  make build-cross  - Cross-build for amd64/arm64/armv7/armv6 (needs cross toolchains)"
 	@echo "  make test         - Run tests"
 	@echo "  make test-verbose - Run tests with verbose output"

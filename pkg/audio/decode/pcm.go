@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio"
 )
 
 type PCMDecoder struct {

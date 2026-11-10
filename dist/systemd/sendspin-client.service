@@ -1,0 +1,17 @@
+[Unit]
+Description=Sendspin Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/spinsync
+ExecStart=/usr/local/bin/spinsync -server=${SENDSPIN_SERVER} ${SPINSYNC_OPTS}
+Restart=on-failure
+RestartSec=5s
+# The identity key must survive restarts; keep it in a root-owned dir.
+User=sendspin
+Group=audio
+
+[Install]
+WantedBy=multi-user.target

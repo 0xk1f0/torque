@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
 )
 
 // Pair method identifiers (deprecated spellings retained so the pairing

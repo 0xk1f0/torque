@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
 )
 
 // ServerConfig configures the server side of session establishment.

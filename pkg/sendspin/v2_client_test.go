@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Sendspin/sendspin-go/pkg/protocol/playback"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/session"
+	"github.com/0xk1f0/spinsync/pkg/protocol/playback"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/protocol/session"
 	"github.com/gorilla/websocket"
 )
 

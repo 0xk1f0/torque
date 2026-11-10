@@ -15,13 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
-	"github.com/Sendspin/sendspin-go/pkg/audio/decode"
-	"github.com/Sendspin/sendspin-go/pkg/audio/output"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/playback"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/session"
-	"github.com/Sendspin/sendspin-go/pkg/sync"
+	"github.com/0xk1f0/spinsync/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio/decode"
+	"github.com/0xk1f0/spinsync/pkg/audio/output"
+	"github.com/0xk1f0/spinsync/pkg/protocol/playback"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/protocol/session"
+	"github.com/0xk1f0/spinsync/pkg/sync"
 	"github.com/gorilla/websocket"
 )
 

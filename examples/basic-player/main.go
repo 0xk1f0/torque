@@ -5,8 +5,8 @@ package main
 import (
 	"log"
 
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
-	"github.com/Sendspin/sendspin-go/pkg/sendspin"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/sendspin"
 )
 
 func main() {

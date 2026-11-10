@@ -5,7 +5,7 @@ package decode
 import (
 	"testing"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio"
 )
 
 // buildMinimalFLACHeader creates a syntactically valid FLAC codec_header

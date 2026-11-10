@@ -1,18 +1,18 @@
 # syntax=docker/dockerfile:1
-# ABOUTME: Multi-architecture build for the Sendspin client (sendspin-client)
+# ABOUTME: Multi-architecture build for the Sendspin client (spinsync)
 # ABOUTME: Use `docker buildx --platform` to cross-build for every Raspberry Pi
 # ABOUTME: architecture (armv6, armv7, arm64) plus desktop x86_64.
 #
 # Build binaries for all targets in one shot:
 #   docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6 \
 #       --target export --output type=local,dest=dist .
-#     produces dist/linux_amd64/sendspin-client, dist/linux_arm64/sendspin-client,
-#     dist/linux_arm_v7/sendspin-client, dist/linux_arm_v6/sendspin-client.
+#     produces dist/linux_amd64/spinsync, dist/linux_arm64/spinsync,
+#     dist/linux_arm_v7/spinsync, dist/linux_arm_v6/spinsync.
 #
 # Build just one target (or a runnable image via --target runtime):
 #   docker buildx build --platform linux/arm/v6 --target export \
 #       --output type=local,dest=dist .
-#   docker buildx build --platform linux/arm64 --target runtime -t sendspin-client .
+#   docker buildx build --platform linux/arm64 --target runtime -t spinsync .
 #
 # Prerequisites: cross-platform builds need QEMU/binfmt registration:
 #   docker run --privileged tonistiigi/binfmt:latest --install all
@@ -27,7 +27,7 @@
 #     dependency, consistent with the rest of the build.
 
 # ---------------------------------------------------------------------------
-# builder — compiles sendspin-client for the requested --platform.
+# builder — compiles spinsync for the requested --platform.
 FROM golang:1.27-bookworm AS builder
 
 # buildx fills these automatically from --platform (TARGETARCH=amd64|arm64|arm,
@@ -65,9 +65,9 @@ RUN set -eu; \
         fi; \
     fi; \
     go build -trimpath \
-      -ldflags "-X github.com/Sendspin/sendspin-go/internal/version.Version=${VERSION} -s -w" \
-      -o /out/sendspin-client \
-      ./cmd/sendspin-client
+      -ldflags "-X github.com/0xk1f0/spinsync/internal/version.Version=${VERSION} -s -w" \
+      -o /out/spinsync \
+      ./cmd/spinsync
 
 # ---------------------------------------------------------------------------
 # export — empty filesystem carrying only the built binaries, so
@@ -86,5 +86,5 @@ RUN apt-get update && \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /out/sendspin-client /usr/local/bin/sendspin-client
-ENTRYPOINT ["/usr/local/bin/sendspin-client"]
+COPY --from=builder /out/spinsync /usr/local/bin/spinsync
+ENTRYPOINT ["/usr/local/bin/spinsync"]

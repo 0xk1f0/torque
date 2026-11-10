@@ -5,7 +5,7 @@ package decode
 import (
 	"fmt"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio"
 	"gopkg.in/hraban/opus.v2"
 )
 

@@ -51,7 +51,7 @@ player.Connect()
 
 ## Next Steps
 
-- Full CLI: `cmd/sendspin-client/`
+- Full CLI: `cmd/spinsync/`
 - Library docs: `pkg/sendspin/`
 - Lower-level APIs: `pkg/audio/`, `pkg/protocol/`, `pkg/sync/`
 
@@ -59,7 +59,7 @@ player.Connect()
 
 **No audio playing?**
 - Verify the server is reachable: `nc -vz <server> 8927`
-- Check your output device: `sendspin-client --help`
+- Check your output device: `spinsync --help`
 - Watch logs for clock-sync or connection errors
 
 **Connection refused?**

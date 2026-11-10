@@ -1,17 +1,17 @@
 #!/bin/bash
 # ABOUTME: Quickstart for the Sendspin client on a Raspberry Pi
-# ABOUTME: Installs deps, builds sendspin-client, registers a systemd service
+# ABOUTME: Installs deps, builds spinsync, registers a systemd service
 set -euo pipefail
 
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/<fork>/sendspin-client/main/scripts/quickstart-pi.sh | sudo bash     \
+#   curl -fsSL https://raw.githubusercontent.com/<fork>/spinsync/main/scripts/quickstart-pi.sh | sudo bash     \
 #       -s -- --server 192.168.1.10:8927
 # Flags (after --):
 #   --server <host:port>  (required) encrypted server to connect to
 #   --name    <name>      client friendly name
 #   --identity <path>     identity key path (default /etc/sendspin/identity)
 #   --branch  <branch>    repo branch to build (default main)
-#   --repo    <url>       repo to clone (default https://github.com/Sendspin/sendspin-go.git)
+#   --repo    <url>       repo to clone (default https://github.com/0xk1f0/spinsync.git)
 #   --uninstall           remove the service, binary, and deps
 
 [[ "$(id -u)" -eq 0 ]] || { echo "run as root (sudo)" >&2; exit 1; }
@@ -20,7 +20,7 @@ SERVER=""
 NAME=""
 IDENTITY="/etc/sendspin/identity"
 BRANCH="main"
-REPO="https://github.com/Sendspin/sendspin-go.git"
+REPO="https://github.com/0xk1f0/spinsync.git"
 UNINSTALL=0
 
 while [[ $# -gt 0 ]]; do
@@ -36,11 +36,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 uninstall() {
-  systemctl disable --now sendspin-client 2>/dev/null || true
-  rm -f /etc/systemd/system/sendspin-client.service
-  rm -f /usr/local/bin/sendspin-client
+  systemctl disable --now spinsync 2>/dev/null || true
+  rm -f /etc/systemd/system/spinsync.service
+  rm -f /usr/local/bin/spinsync
   systemctl daemon-reload
-  echo "Removed sendspin-client. /etc/default/sendspin-client and $IDENTITY left in place."
+  echo "Removed spinsync. /etc/default/spinsync and $IDENTITY left in place."
 }
 
 install_deps() {
@@ -62,27 +62,27 @@ fi
 echo "Installing runtime/build dependencies..."
 install_deps
 
-echo "Building sendspin-client from $REPO@$BRANCH ..."
+echo "Building spinsync from $REPO@$BRANCH ..."
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 git clone --depth 1 --branch "$BRANCH" "$REPO" "$TMP/repo"
 (
   cd "$TMP/repo"
-  make sendspin-client 2>/dev/null || GOFLAGS=-tags=nolibopusfile go build -o sendspin-client ./cmd/sendspin-client
+  make spinsync 2>/dev/null || GOFLAGS=-tags=nolibopusfile go build -o spinsync ./cmd/spinsync
 )
-install -m 755 "$TMP/repo/sendspin-client" /usr/local/bin/sendspin-client
+install -m 755 "$TMP/repo/spinsync" /usr/local/bin/spinsync
 
 echo "Installing systemd service..."
-cat > /etc/default/sendspin-client <<EOF
-# sendspin-client configuration
+cat > /etc/default/spinsync <<EOF
+# spinsync configuration
 SENDSPIN_SERVER=$SERVER
-SENDSPIN_CLIENT_OPTS=--name "$NAME" --identity $IDENTITY
+SPINSYNC_OPTS=--name "$NAME" --identity $IDENTITY
 EOF
-install -m 644 "$TMP/repo/dist/systemd/sendspin-client.service" /etc/systemd/system/sendspin-client.service
+install -m 644 "$TMP/repo/dist/systemd/spinsync.service" /etc/systemd/system/spinsync.service
 systemctl daemon-reload
 
 echo ""
 echo "Done. Start it with:"
-echo "  sudo systemctl enable --now sendspin-client"
+echo "  sudo systemctl enable --now spinsync"
 echo "See the log with:"
-echo "  journalctl -u sendspin-client -f"
+echo "  journalctl -u spinsync -f"

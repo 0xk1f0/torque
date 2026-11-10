@@ -13,7 +13,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio"
 	"github.com/gen2brain/malgo"
 )
 

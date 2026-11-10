@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
 	"github.com/gorilla/websocket"
 )
 

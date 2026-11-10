@@ -1,92 +1,64 @@
-# Sendspin Client
+# spinsync
 
-A Go implementation of the [Sendspin Protocol](https://github.com/Sendspin/spec)
-**client** — a Noise-encrypted player that connects to a Sendspin server and
-plays synchronized audio. This is a client-only fork of
-`Sendspin/sendspin-go`: every server component (the v2 server, the legacy
-engine/TUI, discovery, and the legacy player) has been stripped.
+**spinsync** is a Go implementation of the [Sendspin Protocol](https://github.com/Sendspin/spec)
+**client**: a Noise-encrypted player that connects to a Sendspin server and
+plays synchronized audio.
 
-**Highlights:**
+`spinsync` is a fork of [`Sendspin/sendspin-go`](https://github.com/Sendspin/sendspin-go),
+reworked **client-only** — every server component (the v2 server, the legacy
+engine/TUI, discovery, and the legacy player) was removed.
 
-- **Encrypted by default** — Noise `KKpsk2` transport, so traffic is
-  authenticated and confidential end-to-end over plain `ws://`.
+## Highlights
+
+- **Noise-encrypted transport** (`KKpsk2`) — authenticated, confidential
+  end-to-end over plain `ws://`.
 - **Spec-conformant session** — role negotiation, `server/activate`
-  admissibility, `available`-based streaming, metadata, and control commands
-  audited against the current spec (see [Protocol conformance](#protocol-conformance)).
-- **Hi-res audio** — 24-bit PCM/FLAC and Opus decoding, precise microsecond
-  clock sync via a Kalman time filter.
-- **Library-first** — use `PlayerV2` for out-of-the-box playback, `ReceiverV2`
-  for visualizers/DSP/custom outputs, or the lower-level
-  `pkg/protocol/*` and `pkg/sync` APIs.
-- **Resilient** — clock-sync-loss pause/resume and automatic reconnect with
-  jittered backoff.
-- **Small** — the client module drops the TUI, server engine, and discovery
-  dependencies; builds are ~8 MB stripped.
+  admissibility, `available`-based streaming, metadata and control commands
+  (see [Protocol conformance](#protocol-conformance)).
+- **Hi-res audio** — 24-bit PCM/FLAC and Opus decoding, microsecond sync via a
+  Kalman time filter.
+- **Resilient** — clock-sync-loss pause/resume and automatic reconnect.
+- **Small** — no TUI/server/discovery deps; stripped binaries ~8 MB.
 
-## Requirements
+## Install
 
-- Go ≥ 1.27
-- `pkg-config` + libopus (`libopus-dev`; `libopus0` at runtime)
-- ALSA dev headers on Linux (`libasound2-dev`)
+Requirements: Go ≥ 1.27, `pkg-config`, `libopus` (and ALSA on Linux).
 
 ```bash
-# macOS
-brew install pkg-config opus
-# Ubuntu/Debian
-sudo apt-get install pkg-config libopus-dev libasound2-dev
-```
-
-## Build
-
-```bash
-make            # builds ./sendspin-client
+make            # builds ./spinsync
 make test       # go test ./...
 make lint       # golangci-lint
 ```
 
-Cross-build every Raspberry Pi architecture (plus x86_64):
+Cross-build all Raspberry Pi architectures (+ x86_64):
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6 \
     --target export --output type=local,dest=dist .
-# or natively: make build-cross   (needs aarch64/gnueabihf cross toolchains)
 ```
 
-CI builds the same matrix in `.github/workflows/v2-client.yml`.
+Same matrix in CI: `.github/workflows/v2-client.yml`.
 
 ## Usage
 
 ```bash
-./sendspin-client -server 192.168.1.10:8927 --name "Living Room"
+spinsync -server 192.168.1.10:8927 --name "Living Room"
 ```
-
-Options:
 
 | Flag | Description |
 |---|---|
-| `--server` | Server address, `host:port` (required) |
-| `--name` | Friendly name (default: `hostname-sendspin-client`) |
-| `--identity` | Path to the client identity key (generated on first run, mode 0600) |
-| `--buffer-ms` | Playback buffer in milliseconds (default 500) |
-| `--output-delay-ms` | `output_delay_ms` reported to the server (0–5000) |
-| `--buffer-capacity` | `buffer_capacity` in bytes advertised to the server |
-| `--max-sample-rate` / `--max-bit-depth` | Cap the advertised formats (0 = no cap) |
+| `--server` | Server `host:port` (required) |
+| `--name` | Friendly name |
+| `--identity` | Identity key path (generated on first run, mode 0600) |
+| `--buffer-ms` / `--output-delay-ms` | Playback buffer / `output_delay_ms` |
+| `--buffer-capacity` | Buffer bytes advertised to the server |
+| `--max-sample-rate` / `--max-bit-depth` | Cap advertised formats |
 | `--unpaired-access` | Admit unpaired servers (default true) |
-| `--version` | Print version and exit |
 
-Run as a systemd service on a Raspberry Pi:
-
-```bash
-sudo make install-daemon
-sudo systemctl enable --now sendspin-client
-# configure via /etc/default/sendspin-client
-```
-
-Or use `scripts/quickstart-pi.sh` for a one-shot install.
+Run as a service: `sudo make install-daemon`, then configure
+`/etc/default/spinsync`. One-shot Pi install: `scripts/quickstart-pi.sh`.
 
 ## Library
-
-### PlayerV2 — play audio
 
 ```go
 id, _ := secure.LoadOrGenerateIdentity("/home/pi/.config/sendspin/identity")
@@ -95,76 +67,41 @@ player, _ := sendspin.NewPlayerV2(sendspin.V2Config{
     ServerAddr: "192.168.1.10:8927",
     Identity:   id,
     Name:       "Living Room",
-    Volume:     80,
-    OnMetadata: func(m sendspin.Metadata) {
-        log.Printf("Now playing: %s - %s", m.Artist, m.Title)
-    },
-    OnError: func(err error) { log.Printf("client error: %v", err) },
+    OnMetadata: func(m sendspin.Metadata) { log.Printf("%s - %s", m.Artist, m.Title) },
+    OnError:    func(err error) { log.Printf("client error: %v", err) },
 })
-
 player.Connect()
 ```
 
-### ReceiverV2 — get raw decoded audio
+`ReceiverV2` exposes the same pipeline without an audio device
+(connect → session → clock sync → stream → decode → `<-chan audio.Buffer`).
 
-`ReceiverV2` does connect → handshake → session → clock sync → stream
-lifecycle → decode → schedule, and emits `audio.Buffer` on `Output()`. Use it
-for visualizers, DSP, or a custom output backend.
-
-## Examples
-
-See [`examples/basic-player`](examples/basic-player/).
-
-## Architecture
+## Layout
 
 ```
-Network:  protocol/secure  (Noise transport, identities, psk, pairing tokens)
-Session:  protocol/session (client establishment, activate rules, messaging)
-Client:   sendspin        (ReceiverV2 + PlayerV2, scheduling, reconnect)
-Sync:     sync            (Kalman time filter)
-Audio:    audio           (codec decode, malgo output)
-```
-
-## Development
-
-```bash
-make test
-make lint
+pkg/sendspin         ReceiverV2/PlayerV2, scheduler, reconnect, sync-loss
+pkg/protocol/secure  Noise KKpsk2 transport, identities, psk, pairing tokens
+pkg/protocol/session Client establishment, activate rules, messaging, pairing
+pkg/protocol/playback Player-audio chunk parsing (13-byte header, send_ahead)
+pkg/audio            Codec decode (pcm/opus/flac), malgo output
+pkg/sync             Kalman clock filter
+cmd/spinsync         The CLI
 ```
 
 ## Protocol conformance
 
-The client is conformed against the
-[Sendspin Protocol](https://github.com/Sendspin/spec)
-(bl: `c281aeb`, 2026-11-09) — every wire message it speaks was audited
-field-by-field against the spec.
-
-Implemented and tested:
-
-- **Transport** (`pkg/protocol/secure`): Noise `KKpsk2` client (responder)
-  handshake, both cipher suites, `psk_category`-aware PSK selection with
-  Sentinel fallback on an initial-handshake lookup miss, type-1 flag
-  fragmentation, identities and `SP:` pairing tokens, re-handshake responder.
-- **Session** (`pkg/protocol/session`): `client/hello` roles, `server/activate`
-  admissibility, `client/state.available` on every message (initial
-  `client/state` only after clock sync), `stream/start`/`clear`/`end` (incl.
-  `from_timestamp`), metadata/controller `server/state`, player
-  `server/command`, `server/unpair`.
-- **Audio** (`pkg/protocol/playback`): 13-byte player-audio header
-  (`type` + `timestamp` + `send_ahead`; `send_ahead` ignored for scheduling
-  and saturation values not used as samples), 20 ms chunks inside the
-  15–150 ms bound, pcm/opus/flac decoding.
-- **Client** (`pkg/sendspin`, `pkg/sync`): Kalman time filter, clock-sync
-  bursts, `output_delay_ms` scheduling, graceful degradation on sync loss,
-  reconnect/backoff.
+Audited against [`Sendspin/spec`](https://github.com/Sendspin/spec) at
+`c281aeb` (2026-11-09). Implemented: `KKpsk2` client (responder) handshake
+with both suites, `psk_category` selection with Sentinel fallback, type-1
+fragmentation, `SP:` pairing tokens, `server/activate` admissibility,
+`client/state.available` on every message, stream lifecycle incl.
+`from_timestamp`, metadata/controller state and player commands, 13-byte
+audio chunks with `send_ahead` handling.
 
 Known limitation: the server-side Sentinel credential-mismatch re-verify is a
-server concern (not shipped here); the client implements the matching fallback
-and exposes pairing-record resolution via `V2Config.ResolvePSK`.
-
-Conformance is enforced by `go test ./...` (protocol + client suites) and the
-cross-platform build matrix in `.github/workflows/v2-client.yml`.
+server concern (not shipped here); the client implements the matching
+fallback and exposes pairing-record resolution via `V2Config.ResolvePSK`.
 
 ## License
 
-See [LICENSE](LICENSE).
+[LICENSE](LICENSE) (Community Specification License 1.0).

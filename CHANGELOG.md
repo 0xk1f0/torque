@@ -15,7 +15,7 @@ Forked and reworked as **client-only** — the encrypted Sendspin client.
   session and pairing (`pkg/protocol/session`), player-audio chunk parsing
   (`pkg/protocol/playback`), codec decode + malgo output (`pkg/audio`), and the
   Kalman clock filter (`pkg/sync`).
-- Single CLI: `cmd/sendspin-client`; multi-architecture builds via
+- Single CLI: `cmd/spinsync`; multi-architecture builds via
   `.github/workflows/v2-client.yml` and `Dockerfile`
   (amd64/arm64/armv7/armv6, including the Pi Zero W).
 - Build on Go 1.27; module dependency set reduced (no TUI, discovery, mp3, or

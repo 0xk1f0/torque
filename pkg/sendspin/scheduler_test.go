@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
-	"github.com/Sendspin/sendspin-go/pkg/sync"
+	"github.com/0xk1f0/spinsync/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/sync"
 )
 
 // TestScheduler_StaticDelayShift is a regression guard for the

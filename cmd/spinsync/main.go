@@ -19,16 +19,16 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/Sendspin/sendspin-go/internal/version"
-	"github.com/Sendspin/sendspin-go/pkg/audio"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
-	"github.com/Sendspin/sendspin-go/pkg/protocol/session"
-	"github.com/Sendspin/sendspin-go/pkg/sendspin"
+	"github.com/0xk1f0/spinsync/internal/version"
+	"github.com/0xk1f0/spinsync/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/spinsync/pkg/protocol/session"
+	"github.com/0xk1f0/spinsync/pkg/sendspin"
 )
 
 var (
 	serverAddr     = flag.String("server", "", "Server address (host:port), e.g. 192.168.1.10:8927")
-	name           = flag.String("name", "", "Player friendly name (default: hostname-sendspin-client)")
+	name           = flag.String("name", "", "Player friendly name (default: hostname-spinsync)")
 	identityPath   = flag.String("identity", defaultIdentityPath(), "Path to the client identity key (generated on first run, 0600)")
 	bufferMs       = flag.Int("buffer-ms", 500, "Playback buffer size in milliseconds")
 	outputDelayMs  = flag.Int("output-delay-ms", 0, "output_delay_ms reported to the server (0-5000)")

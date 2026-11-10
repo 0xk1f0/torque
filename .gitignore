@@ -1,16 +1,10 @@
 # Binaries
-/sendspin-player
-/sendspin-server
-/resonate-player
-/resonate-server
-/test-sync
-/ma-player
+/spinsync
 *.exe
 *.dll
 *.so
 *.dylib
 bin/
-dist/
 
 # Test binaries
 *.test
@@ -31,11 +25,8 @@ coverage.html
 
 # OS
 .DS_Store
-Thumbs.db
+Thumbs.txt
 output.txt
-sendspin-go
-resonate-go
-prompts/
 
 # Worktrees
 .worktrees/

@@ -1,4 +1,4 @@
-module github.com/Sendspin/sendspin-go
+module github.com/0xk1f0/spinsync
 
 go 1.27
 

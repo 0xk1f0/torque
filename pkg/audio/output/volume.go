@@ -5,7 +5,7 @@ package output
 import (
 	"math"
 
-	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/0xk1f0/spinsync/pkg/audio"
 )
 
 // applyVolume applies volume and mute to samples with clipping protection.

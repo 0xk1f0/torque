@@ -28,5 +28,5 @@ id, _ := secure.LoadOrGenerateIdentity("/home/pi/.config/sendspin/identity")
 
 ## Next steps
 
-- Full CLI with reconnect, output-delay, buffer tuning: `cmd/sendspin-client/`
+- Full CLI with reconnect, output-delay, buffer tuning: `cmd/spinsync/`
 - Library docs: `pkg/sendspin/`
