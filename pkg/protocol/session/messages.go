@@ -240,6 +240,8 @@ func typeOf(v any) (string, error) {
 		return "client/command", nil
 	case ServerCommand, *ServerCommand:
 		return "server/command", nil
+	case ClientPairPending, *ClientPairPending:
+		return "client/pair-pending", nil
 	case ClientPairInit, *ClientPairInit:
 		return "client/pair-init", nil
 	case ServerPairInit, *ServerPairInit:
@@ -250,12 +252,16 @@ func typeOf(v any) (string, error) {
 		return "client/pair-auth", nil
 	case ServerPairConfirm, *ServerPairConfirm:
 		return "server/pair-confirm", nil
+	case ClientPairRetry, *ClientPairRetry:
+		return "client/pair-retry", nil
 	case ClientPairConfirm, *ClientPairConfirm:
 		return "client/pair-confirm", nil
 	case ClientPairFinalize, *ClientPairFinalize:
 		return "client/pair-finalize", nil
 	case ServerPairFinalize, *ServerPairFinalize:
 		return "server/pair-finalize", nil
+	case ServerUnpair, *ServerUnpair:
+		return "server/unpair", nil
 	case PairAbort, *PairAbort:
 		return "pair/abort", nil
 	default:
@@ -311,6 +317,8 @@ func Parse(raw []byte) (any, error) {
 		v = &ClientCommand{}
 	case "server/command":
 		v = &ServerCommand{}
+	case "client/pair-pending":
+		v = &ClientPairPending{}
 	case "client/pair-init":
 		v = &ClientPairInit{}
 	case "server/pair-init":
@@ -321,12 +329,16 @@ func Parse(raw []byte) (any, error) {
 		v = &ClientPairAuth{}
 	case "server/pair-confirm":
 		v = &ServerPairConfirm{}
+	case "client/pair-retry":
+		v = &ClientPairRetry{}
 	case "client/pair-confirm":
 		v = &ClientPairConfirm{}
 	case "client/pair-finalize":
 		v = &ClientPairFinalize{}
 	case "server/pair-finalize":
 		v = &ServerPairFinalize{}
+	case "server/unpair":
+		v = &ServerUnpair{}
 	case "pair/abort":
 		v = &PairAbort{}
 	default:

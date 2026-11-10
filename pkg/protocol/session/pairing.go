@@ -19,16 +19,24 @@ const (
 
 // Pairing message payloads (registered in messages.go's envelope registry).
 
-// ClientPairInit starts a PIN-pairing attempt.
+// ClientPairPending reports that the client is holding back the selected
+// attempt (no pairing window open, or the round limit holds it back). It does
+// not start the attempt or its timeout.
+type ClientPairPending struct {
+	PairingIndex int     `json:"pairing_index"`
+	Message      *string `json:"message,omitempty"`
+}
+
+// ClientPairInit starts a pairing attempt: attempt start plus, for the
+// dynamic pairing code flow, the commitment commit_B.
 type ClientPairInit struct {
 	PairingIndex int    `json:"pairing_index"`
 	CommitB      string `json:"commit_B,omitempty"`
 }
 
-// ServerPairInit carries the server nonce in dynamic-PIN pairing.
+// ServerPairInit carries the server nonce in dynamic-code pairing.
 type ServerPairInit struct {
-	NonceA    string `json:"nonce_A"`
-	PINLength int    `json:"pin_length"`
+	NonceA string `json:"nonce_A"`
 }
 
 // ServerPairAuth carries the server's CPace public share.
@@ -46,11 +54,15 @@ type ServerPairConfirm struct {
 	ServerKC string `json:"server_kc"`
 }
 
-// ClientPairConfirm carries the client's MCF tag and, in dynamic-PIN
-// pairing, the commit opening.
+// ClientPairRetry asks the server for a new pairing round when the client's
+// verification of server_kc failed. Sent in place of client/pair-confirm.
+type ClientPairRetry struct{}
+
+// ClientPairConfirm carries the client's MCF tag and, in dynamic-code
+// pairing, the sealed commit opening wrapped_nonce_B.
 type ClientPairConfirm struct {
-	ClientKC string `json:"client_kc"`
-	NonceB   string `json:"nonce_B,omitempty"`
+	ClientKC      string `json:"client_kc"`
+	WrappedNonceB string `json:"wrapped_nonce_B,omitempty"`
 }
 
 // ClientPairFinalize delivers the long-term PSK — directly in the Pairing
@@ -63,6 +75,11 @@ type ClientPairFinalize struct {
 
 // ServerPairFinalize acknowledges the persisted pairing record.
 type ServerPairFinalize struct{}
+
+// ServerUnpair is sent by a paired server to drop its own pairing record from
+// the client: the client removes the record, sends client/goodbye reason
+// 'unpaired', and closes; an unpaired session ignores it.
+type ServerUnpair struct{}
 
 // PairAbort aborts a pairing attempt.
 type PairAbort struct {
@@ -136,12 +153,28 @@ func (m *MemoryPairingStore) Resolve(peerID string) (secure.PSK, PSKCategory) {
 
 // CompletePairingPSK runs the server side of the Pairing PSK flow on a
 // session whose initial activate declared ['pairing'] with method
-// pairing_psk: receive client/pair-finalize, persist the delivered PSK,
-// acknowledge, re-handshake to the new PSK, and re-establish the session
+// pairing_psk: the client MUST send client/pair-init followed immediately by
+// client/pair-finalize; the server consumes both, persists the delivered PSK,
+// acknowledges, re-handshakes to the new PSK, and re-establishes the session
 // under `resulting` (typically playback at long-term trust). Returns the new
 // session; the old one is dead.
 func (s *ServerSession) CompletePairingPSK(persist func(clientID string, psk secure.PSK) error, resulting ServerConfig) (*ServerSession, error) {
+	// 1. client/pair-init (parsed for the wire sequence; the pairing index
+	//    check uses this session's pairing counter).
 	msg, err := readControl(s.Conn)
+	if err != nil {
+		return nil, fmt.Errorf("read client/pair-init: %w", err)
+	}
+	switch m := msg.(type) {
+	case *ClientPairInit:
+	case *PairAbort:
+		return nil, &PairAbortError{Reason: m.Reason}
+	default:
+		return nil, fmt.Errorf("expected client/pair-init first, got %T", msg)
+	}
+
+	// 2. client/pair-finalize.
+	msg, err = readControl(s.Conn)
 	if err != nil {
 		return nil, fmt.Errorf("read client/pair-finalize: %w", err)
 	}
@@ -153,6 +186,11 @@ func (s *ServerSession) CompletePairingPSK(persist func(clientID string, psk sec
 		psk, err := secure.ParsePSK(m.LongTermPSK)
 		if err != nil {
 			return nil, fmt.Errorf("client/pair-finalize: %w", err)
+		}
+		// The delivered PSK must not equal the Sentinel PSK (protocol error).
+		if psk == secure.SentinelPSK() {
+			s.Conn.Close()
+			return nil, fmt.Errorf("delivered long-term PSK equals the Sentinel PSK (protocol error)")
 		}
 		if err := persist(s.Conn.PeerID(), psk); err != nil {
 			return nil, fmt.Errorf("persist pairing record: %w", err)
@@ -172,11 +210,23 @@ func (s *ServerSession) CompletePairingPSK(persist func(clientID string, psk sec
 	}
 }
 
-// CompletePairingPSKClient runs the client side of the Pairing PSK flow:
-// deliver newPSK, await the server's acknowledgement, persist locally,
-// respond to the server's re-handshake, and re-establish the session with
-// resultingHello (which must re-assert trust_level, now 'user').
+// Unpair drops the server's pairing record for this client: it sends
+// server/unpair and returns, leaving the connection for the client to close
+// (the client removes the record and closes with goodbye 'unpaired'). The
+// server-side record removal is the caller's job (it owns the store).
+func (s *ServerSession) Unpair() error {
+	return writeMessage(s.Conn, ServerUnpair{})
+}
+
+// CompletePairingPSKClient runs the client side of the Pairing PSK flow: the
+// client MUST send client/pair-init followed immediately by client/pair-finalize
+// (without waiting for a server response); then await the server's
+// acknowledgement, persist locally, respond to the server's re-handshake, and
+// re-establish the session with resultingHello.
 func (s *ClientSession) CompletePairingPSKClient(newPSK secure.PSK, persist func(serverID string, psk secure.PSK) error, resultingHello ClientHello) (*ClientSession, error) {
+	if err := writeMessage(s.Conn, ClientPairInit{}); err != nil {
+		return nil, fmt.Errorf("send client/pair-init: %w", err)
+	}
 	if err := writeMessage(s.Conn, ClientPairFinalize{LongTermPSK: newPSK.String()}); err != nil {
 		return nil, fmt.Errorf("send client/pair-finalize: %w", err)
 	}

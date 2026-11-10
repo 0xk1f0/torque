@@ -1,5 +1,7 @@
-// ABOUTME: PIN pairing flow choreography — dynamic and static PIN, both
-// ABOUTME: sides, over the CPace primitives and re-handshake in pkg secure.
+// ABOUTME: PIN pairing flow choreography — dynamic and static, both sides,
+// ABOUTME: over the CPace primitives and re-handshake in pkg secure. Wire
+// ABOUTME: shapes follow the current spec (derivation, sid round, sealed
+// ABOUTME: nonce_B/PSK).
 package session
 
 import (
@@ -15,32 +17,33 @@ import (
 // value carried on the wire.
 var b64 = base64.RawURLEncoding
 
-// Pair-abort reasons produced by the PIN flows.
+// Pair-abort reasons produced by the pairing flows (spec vocabulary).
 const (
-	AbortPINMismatch           = "pin_mismatch"
-	AbortPINLengthUnacceptable = "pin_length_unacceptable"
-	AbortAttemptTimeout        = "attempt_timeout"
-	AbortUserCancelled         = "user_cancelled"
-	AbortLockedOut             = "locked_out"
+	AbortPairingCodeMismatch string = "pairing_code_mismatch"
+	AbortAttemptTimeout      string = "attempt_timeout"
+	AbortConcurrentAttempt   string = "concurrent_attempt"
+	AbortMethodNotSupported  string = "method_not_supported"
+	AbortUserCancelled       string = "user_cancelled"
+
+	// AbortPINMismatch is the pre-spec spelling, kept as an alias.
+	AbortPINMismatch = AbortPairingCodeMismatch
 )
 
 // PINPairingServerConfig configures the server side of a PIN pairing attempt.
 type PINPairingServerConfig struct {
-	// Method is dynamic_pin or static_pin (must match the SelectedPairMethod
-	// of the pairing activate already sent by EstablishServer).
+	// Method is dynamic_pairing_code or static_pairing_code.
 	Method string
-	// PairingCounter is the number of pairing activates since the last Noise
-	// handshake — the value EstablishServer used, fed into the CPace sid and
-	// checked against the client's pairing_index.
-	PairingCounter uint32
-	// PINLength is the negotiated dynamic-PIN length to advertise in
-	// server/pair-init. Ignored for static PIN.
-	PINLength int
-	// ProvidePIN returns the PIN the operator entered. For dynamic PIN it is
-	// called after server/pair-init is sent (the client has emitted the PIN
-	// for the operator to read); for static PIN it returns the device's
-	// configured static PIN.
-	ProvidePIN func() (string, error)
+	// PairingIndex is the number of pairing server/activate messages since
+	// the last Noise handshake — the value EstablishServer used, fed into the
+	// CPace sid and checked against the client's pairing_index.
+	PairingIndex uint32
+	// Format is the dynamic emission format (digits or qr_code). Ignored for
+	// static PIN.
+	Format string
+	// ProvideCode returns the pairing code the operator entered, as its PRS
+	// bytes: the 6 ASCII digits for dynamic digits, the 24 raw bytes for
+	// dynamic qr_code, or the 8 ASCII digits for static.
+	ProvideCode func() ([]byte, error)
 	// Persist stores the unwrapped long-term PSK for this client.
 	Persist func(clientID string, psk secure.PSK) error
 	// Resulting is the post-pairing session configuration (typically
@@ -54,8 +57,9 @@ type PINPairingServerConfig struct {
 // re-establishes the session. A pairing failure sends pair/abort and returns
 // a *PairAbortError; the connection stays open for a retry.
 func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerSession, error) {
-	dynamic := cfg.Method == PairMethodDynamicPIN
 	h := s.Conn.HandshakeHash()
+	round := uint32(1) // single round in this flow; retries are a follow-up
+	sid := secure.BuildPakeSID(h, cfg.PairingIndex, round)
 
 	// 1. client/pair-init: attempt start + (dynamic) commit_B.
 	msg, err := readControl(s.Conn)
@@ -69,15 +73,16 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 		}
 		return nil, fmt.Errorf("expected client/pair-init, got %T", msg)
 	}
-	if uint32(init.PairingIndex) != cfg.PairingCounter {
-		// A lower index is a leftover (silently discarded by spec); at this
-		// synchronous entry point either way it is not our live attempt.
-		return nil, fmt.Errorf("pairing_index %d does not match counter %d", init.PairingIndex, cfg.PairingCounter)
+	if uint32(init.PairingIndex) > cfg.PairingIndex {
+		// A higher pairing_index is a protocol error; a lower one is a
+		// superseded attempt — both end the synchronous entry point.
+		return nil, fmt.Errorf("pairing_index %d out of range (counter %d)", init.PairingIndex, cfg.PairingIndex)
 	}
+	dynamic := cfg.Method == string(PairMethodDynamicPairingCode)
 	var commitB []byte
 	if dynamic {
 		if init.CommitB == "" {
-			return nil, fmt.Errorf("dynamic pin: client/pair-init missing commit_B")
+			return nil, fmt.Errorf("dynamic code: client/pair-init missing commit_B")
 		}
 		commitB, err = b64.DecodeString(init.CommitB)
 		if err != nil {
@@ -85,32 +90,28 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 		}
 	}
 
-	// 2. (dynamic) server/pair-init: nonce_A + pin_length.
+	// 2. (dynamic) server/pair-init: nonce_A only.
 	var nonceA []byte
 	if dynamic {
 		nonceA = make([]byte, 32)
 		if _, err := rand.Read(nonceA); err != nil {
 			return nil, fmt.Errorf("sample nonce_A: %w", err)
 		}
-		if err := writeMessage(s.Conn, ServerPairInit{
-			NonceA:    b64.EncodeToString(nonceA),
-			PINLength: cfg.PINLength,
-		}); err != nil {
+		if err := writeMessage(s.Conn, ServerPairInit{NonceA: b64.EncodeToString(nonceA)}); err != nil {
 			return nil, fmt.Errorf("send server/pair-init: %w", err)
 		}
 	}
 
-	// The operator now enters the PIN (dynamic: read from the client's
-	// out-channel; static: printed on the device).
-	pin, err := cfg.ProvidePIN()
+	// The operator now enters the code (dynamic: read from the client's
+	// out-channel; static: typed off the device).
+	prs, err := cfg.ProvideCode()
 	if err != nil {
 		_ = writeMessage(s.Conn, PairAbort{Reason: AbortUserCancelled})
-		return nil, fmt.Errorf("obtain operator pin: %w", err)
+		return nil, fmt.Errorf("obtain operator code: %w", err)
 	}
 
-	// 3. CPace as initiator (role A). PRS is the typed PIN's ASCII digits.
-	sid := secure.BuildPakeSID(h, cfg.PairingCounter)
-	cp, err := secure.StartCPace(secure.CPaceInitiator, []byte(pin), sid, nil, secure.CPaceADServer)
+	// 3. CPace as initiator (role A).
+	cp, err := secure.StartCPace(secure.CPaceInitiator, prs, sid, nil, secure.CPaceADServer)
 	if err != nil {
 		return nil, fmt.Errorf("start cpace: %w", err)
 	}
@@ -144,7 +145,7 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 		return nil, fmt.Errorf("send server/pair-confirm: %w", err)
 	}
 
-	// 6. client/pair-confirm: peer tag + (dynamic) revealed nonce_B.
+	// 6. client/pair-confirm: peer tag + (dynamic) wrapped_nonce_B.
 	msg, err = readControl(s.Conn)
 	if err != nil {
 		return nil, fmt.Errorf("read client/pair-confirm: %w", err)
@@ -158,26 +159,30 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 		return nil, fmt.Errorf("decode client_kc: %w", err)
 	}
 
-	// Verification order per spec: commit opening, key confirmation, PIN binding.
+	var nonceB []byte
 	if dynamic {
-		nonceB, err := b64.DecodeString(confirm.NonceB)
+		wrapped, err := b64.DecodeString(confirm.WrappedNonceB)
 		if err != nil {
-			return nil, fmt.Errorf("decode nonce_B: %w", err)
+			return nil, fmt.Errorf("decode wrapped_nonce_B: %w", err)
+		}
+		isk, err := cp.ISK()
+		if err != nil {
+			return nil, err
+		}
+		nonceB, err = secure.UnwrapNonceB(sid, isk, wrapped, s.Conn.Suite())
+		if err != nil {
+			// A wrapped_nonce_B that fails to decrypt is a protocol error.
+			s.Conn.Close()
+			return nil, fmt.Errorf("unwrap nonce_B (protocol error): %w", err)
 		}
 		if subtle.ConstantTimeCompare(secure.CommitB(nonceB), commitB) != 1 {
-			// A revealed nonce that doesn't open the commit is a protocol
-			// error: close without an application-level message.
+			// A nonce that doesn't open the commitment is a protocol error.
 			s.Conn.Close()
 			return nil, fmt.Errorf("nonce_B does not open commit_B (protocol error)")
 		}
-		if !cp.Verify(peerTag) {
-			return s.abortPIN(AbortPINMismatch)
-		}
-		if secure.DerivePIN(h, nonceA, nonceB, cfg.PINLength) != pin {
-			return s.abortPIN(AbortPINMismatch)
-		}
-	} else if !cp.Verify(peerTag) {
-		return s.abortPIN(AbortPINMismatch)
+	}
+	if !cp.Verify(peerTag) {
+		return s.abortCode(AbortPairingCodeMismatch)
 	}
 
 	// 7. client/pair-finalize: wrapped PSK.
@@ -196,15 +201,17 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 	if err != nil {
 		return nil, fmt.Errorf("decode wrapped_psk: %w", err)
 	}
-	isk, err := cp.ISK()
-	if err != nil {
-		return nil, err
-	}
-	psk, err := secure.UnwrapPSK(sid, isk, wrapped, s.Conn.Suite())
+	psk, err := secure.UnwrapPSK(sid, mustISK(cp), wrapped, s.Conn.Suite())
 	if err != nil {
 		// A wrapped_psk that fails to decrypt is a protocol error.
 		s.Conn.Close()
 		return nil, fmt.Errorf("unwrap psk (protocol error): %w", err)
+	}
+	// The delivered PSK must not equal the Sentinel or this connection's
+	// pairing PSK (protocol error, persist nothing).
+	if psk == secure.SentinelPSK() {
+		s.Conn.Close()
+		return nil, fmt.Errorf("delivered long-term PSK equals the Sentinel PSK (protocol error)")
 	}
 	if err := cfg.Persist(s.Conn.PeerID(), psk); err != nil {
 		return nil, fmt.Errorf("persist pairing record: %w", err)
@@ -222,7 +229,12 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 	return EstablishServer(s.Conn, cfg.Resulting)
 }
 
-func (s *ServerSession) abortPIN(reason string) (*ServerSession, error) {
+func mustISK(cp *secure.CPace) []byte {
+	isk, _ := cp.ISK()
+	return isk
+}
+
+func (s *ServerSession) abortCode(reason string) (*ServerSession, error) {
 	_ = writeMessage(s.Conn, PairAbort{Reason: reason})
 	return nil, &PairAbortError{Reason: reason}
 }
@@ -236,40 +248,41 @@ func unexpectedOrAbort(msg any, want string) error {
 
 // PINPairingClientConfig configures the client side of a PIN pairing attempt.
 type PINPairingClientConfig struct {
-	// Method is dynamic_pin or static_pin.
+	// Method is dynamic_pairing_code or static_pairing_code.
 	Method string
-	// PairingCounter mirrors the server's counter (from the activate that
-	// opened this attempt); used for the pairing_index and CPace sid.
-	PairingCounter uint32
-	// MinPINLength is the client's floor; a server pin_length below it (or
-	// outside 4–12) aborts the attempt.
-	MinPINLength int
-	// StaticPIN is the device's printed PIN (static method only).
-	StaticPIN string
-	// EmitPIN receives the derived dynamic PIN for the operator to read
-	// (dynamic method only).
-	EmitPIN func(pin string)
+	// PairingIndex mirrors the server's index (from the activate that opened
+	// this attempt); used for the pairing_index and CPace sid.
+	PairingIndex uint32
+	// Format is the dynamic emission format (digits or qr_code).
+	Format string
+	// StaticCode is the device's printed code (static method only).
+	StaticCode string
+	// EmitCode receives the pairing code to present to the operator: the
+	// 6-digit code for dynamic digits, the SP: v1 token for dynamic qr_code,
+	// or the static 8-digit code.
+	EmitCode func(code string)
 	// NewPSK mints the long-term PSK to deliver; nil generates a random one.
 	NewPSK func() (secure.PSK, error)
 	// Persist stores the delivered PSK locally against the server_id.
 	Persist func(serverID string, psk secure.PSK) error
-	// ResultingHello is the client/hello for the re-established session; it
-	// must re-assert trust_level 'user'.
+	// ResultingHello is the client/hello for the re-established session.
 	ResultingHello ClientHello
 }
 
 // RunPINPairing runs the client side of a PIN pairing attempt on a session
 // whose activate selected a PIN method. On success it persists the record,
-// responds to the server's re-handshake, and re-establishes the session at
-// user trust. A local check failure sends pair/abort and returns a
-// *PairAbortError.
+// responds to the server's re-handshake, and re-establishes the session. A
+// local check failure sends pair/abort and returns a *PairAbortError.
 func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSession, error) {
-	dynamic := cfg.Method == PairMethodDynamicPIN
 	h := s.Conn.HandshakeHash()
+	round := uint32(1)
+	sid := secure.BuildPakeSID(h, cfg.PairingIndex, round)
+
+	dynamic := cfg.Method == string(PairMethodDynamicPairingCode)
 
 	// 1. client/pair-init.
 	var nonceB []byte
-	init := ClientPairInit{PairingIndex: int(cfg.PairingCounter)}
+	init := ClientPairInit{PairingIndex: int(cfg.PairingIndex)}
 	if dynamic {
 		nonceB = make([]byte, 32)
 		if _, err := rand.Read(nonceB); err != nil {
@@ -281,9 +294,9 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 		return nil, fmt.Errorf("send client/pair-init: %w", err)
 	}
 
-	pin := cfg.StaticPIN
+	code := cfg.StaticCode
 
-	// 2. (dynamic) server/pair-init: nonce_A + pin_length → derive & emit PIN.
+	// 2. (dynamic) server/pair-init: nonce_A → derive & emit the code.
 	var nonceA []byte
 	if dynamic {
 		msg, err := readControl(s.Conn)
@@ -294,20 +307,29 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 		if !ok {
 			return nil, unexpectedOrAbort(msg, "server/pair-init")
 		}
-		if spi.PINLength < cfg.MinPINLength || spi.PINLength > 12 {
-			return s.abortPINClient(AbortPINLengthUnacceptable)
-		}
 		nonceA, err = b64.DecodeString(spi.NonceA)
 		if err != nil {
 			return nil, fmt.Errorf("decode nonce_A: %w", err)
 		}
-		pin = secure.DerivePIN(h, nonceA, nonceB, spi.PINLength)
-		if cfg.EmitPIN != nil {
-			cfg.EmitPIN(pin)
+		switch cfg.Format {
+		case string(PairingFormatDigits):
+			code = secure.DerivePairingDigits(h, nonceA, nonceB)
+		default: // qr_code
+			qr := secure.DerivePairingQR(h, nonceA, nonceB)
+			tok, err := secure.PairingTokenV1(qr)
+			if err != nil {
+				return nil, fmt.Errorf("encode qr pairing token: %w", err)
+			}
+			code = tok
+		}
+		if cfg.EmitCode != nil {
+			cfg.EmitCode(code)
 		}
 	}
 
-	// 3. server/pair-auth → CPace as responder (role B).
+	// 3. server/pair-auth → CPace as responder (role B); PRS for the static
+	// flow is the printed 8-digit code; for dynamic digits the 6 ASCII
+	// digits; for dynamic qr_code the 24-byte version-1 token payload.
 	msg, err := readControl(s.Conn)
 	if err != nil {
 		return nil, fmt.Errorf("read server/pair-auth: %w", err)
@@ -320,8 +342,11 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 	if err != nil {
 		return nil, fmt.Errorf("decode pake_msg_1: %w", err)
 	}
-	sid := secure.BuildPakeSID(h, cfg.PairingCounter)
-	cp, err := secure.StartCPace(secure.CPaceResponder, []byte(pin), sid, nil, secure.CPaceADClient)
+	prs, err := s.codePRS(cfg, dynamic, code)
+	if err != nil {
+		return nil, err
+	}
+	cp, err := secure.StartCPace(secure.CPaceResponder, prs, sid, nil, secure.CPaceADClient)
 	if err != nil {
 		return nil, fmt.Errorf("start cpace: %w", err)
 	}
@@ -346,13 +371,21 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 		return nil, fmt.Errorf("decode server_kc: %w", err)
 	}
 	if !cp.Verify(serverTag) {
-		return s.abortPINClient(AbortPINMismatch)
+		return s.abortCodeClient(AbortPairingCodeMismatch)
 	}
 
 	// 5. client/pair-confirm + client/pair-finalize (back to back).
 	confirm := ClientPairConfirm{ClientKC: b64.EncodeToString(mustTag(cp))}
 	if dynamic {
-		confirm.NonceB = b64.EncodeToString(nonceB)
+		isk, err := cp.ISK()
+		if err != nil {
+			return nil, err
+		}
+		wrapped, err := secure.WrapNonceB(sid, isk, nonceB, s.Conn.Suite())
+		if err != nil {
+			return nil, fmt.Errorf("wrap nonce_B: %w", err)
+		}
+		confirm.WrappedNonceB = b64.EncodeToString(wrapped)
 	}
 	if err := writeMessage(s.Conn, confirm); err != nil {
 		return nil, fmt.Errorf("send client/pair-confirm: %w", err)
@@ -367,11 +400,7 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 	if err != nil {
 		return nil, fmt.Errorf("mint long-term psk: %w", err)
 	}
-	isk, err := cp.ISK()
-	if err != nil {
-		return nil, err
-	}
-	wrapped, err := secure.WrapPSK(sid, isk, newPSK, s.Conn.Suite())
+	wrapped, err := secure.WrapPSK(sid, mustISK(cp), newPSK, s.Conn.Suite())
 	if err != nil {
 		return nil, fmt.Errorf("wrap psk: %w", err)
 	}
@@ -412,7 +441,21 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 	return EstablishClient(s.Conn, ClientConfig{Hello: cfg.ResultingHello, PSKCategory: PSKLongTerm})
 }
 
-func (s *ClientSession) abortPINClient(reason string) (*ClientSession, error) {
+// codePRS converts the operator-facing code into the CPace PRS byte string:
+// ASCII digits for digits/static, or the 24-byte payload of a version-1 token
+// for dynamic qr_code.
+func (s *ClientSession) codePRS(cfg PINPairingClientConfig, dynamic bool, code string) ([]byte, error) {
+	if dynamic && cfg.Format == string(PairingFormatQR) {
+		_, payload, err := secure.DecodePairingToken(code)
+		if err != nil {
+			return nil, fmt.Errorf("qr pairing token: %w", err)
+		}
+		return payload, nil
+	}
+	return []byte(code), nil
+}
+
+func (s *ClientSession) abortCodeClient(reason string) (*ClientSession, error) {
 	_ = writeMessage(s.Conn, PairAbort{Reason: reason})
 	return nil, &PairAbortError{Reason: reason}
 }
