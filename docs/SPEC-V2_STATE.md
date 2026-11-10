@@ -77,44 +77,45 @@ Full repo green under `-race`.
   format is non-spec. Keep the 65518-byte Noise-payload limit.
 - Empty-plaintext / malformed-sequence close rules are already present ✅.
 
-### 2. Pairing (self-consistent but non-spec; per the "minimal pairing
-   correctness" scope chosen)
-- PIN/Pairing-code derivation (`secure/pinpairing.go`): label
-  `"sendspin-pairing-code-derive-v1"`, fixed 6-digit (`uint256_be(digest)
-  mod 10^6`) or the 24-byte digest for `qr_code`; drop the negotiated
-  variable-length PIN for dynamic codes (static stays fixed 8-digit).
-- CPace `sid` (`secure/pinpairing.go`): add the `round` component
-  (`sid = "sendspin-pair-pake-v1" || h || pairing_index || round`).
-- **`wrapped_nonce_B`** (`session/pairing.go`, `pin_pairing.go`): reveal
-  `nonce_B` only as a 48-byte AEAD wrap under
-  `K_wrap = SHA-256("sendspin-pair-nonce-wrap-v1" || sid || ISK)`; field is
-  `wrapped_nonce_B`.
-- **Pairing-PSK flow must send `client/pair-init` then `client/pair-finalize`
-  back-to-back** (`session/pairing.go`) — the server must accept that
-  sequence. Currently only finalize is sent.
-- **`server/unpair`** message + handling (client removes the record, sends
-  `client/goodbye` reason `unpaired`, closes; unpaired session ignores).
-- **Pairing token (`SP:` v0/v1)** encode/decode; the pairing PSK must be
-  exposed as an `SP:` token for out-of-band distribution.
-- `pair/abort` reasons → spec vocabulary (`pairing_code_mismatch`, etc.);
-  attempt-timeout timer; `client/pair-pending` / `client/pair-retry` / rounds
-  (dynamic) and the static pairing window. (Some may be deferred as features,
-  but the abort-reason vocabulary and derivation are interop.)
-- `supported_pair_methods` descriptors now the map shape ✅ (this branch).
+### 2. Pairing — DONE on this branch (committed May-2026 slice)
+- Pairing-code derivation: label `"sendspin-pairing-code-derive-v1"`; digits =
+  `uint256_be(digest) mod 10^6` zero-padded to exactly 6 digits; qr_code =
+  `digest[0..24]`. Variable-length PIN / `pin_length` removed.
+- CPace `sid` includes the `round` component (BE32) after `pairing_index`.
+- **`wrapped_nonce_B`** (48-byte AEAD under
+  `K_wrap = SHA-256("sendspin-pair-nonce-wrap-v1" || sid || ISK)`);
+  `nonce_B` is never plaintext on the wire.
+- Pairing-PSK flow sends `client/pair-init` then `client/pair-finalize`
+  back-to-back; the server consumes both (spec sequence).
+- `server/unpair` message + `ServerSession.Unpair`; client handling is wired
+  in ReceiverV2 (OnUnpair).
+- Pairing token (`SP:` v0/v1) codec with RFC4648 base32 + 2→9
+  transliteration + lenient operator-input decoding.
+- `pair/abort` reasons use the spec vocabulary; delivered PSK equal to the
+  Sentinel (or pairing) PSK is a protocol error.
+- `client/pair-pending` and `client/pair-retry` are registered message types;
+  the full rounds/pending/attempt-timeout/static-window choreography and
+  pairing-record eviction remain a robustness follow-up.
 
-### 3. v2 client (the missing production half)
-- No audio-playing client exists on the v2 wire. Build (new package, e.g.
-  `pkg/protocol/clientv2` or extend `pkg/sendspin`):
-  1. `secure.ClientHandshake` → `session.EstablishClient` (activate rules,
-     `available`, role set from `active_roles`).
-  2. Clock sync bursts (`client/time`/`server/time`, 8-sample burst, KS).
-  3. Parse `stream/start` / `stream/clear` / `stream/end`; decode pcm/opus/flac;
-     scheduler with 13-byte-chunk handling + `send_ahead` (ignore saturation
-     samples); output via `pkg/audio/output`.
-  4. Reconnect/backoff and clock-sync-loss degradation ported alongside the
-     stability slice.
-  5. Legacy `pkg/protocol/client.go` (cleartext) is used by the current
-     binaries — keep frozen until the v2 client replaces it.
+### 3. v2 client — DONE on this branch (committed May-2026 slice)
+- **`ReceiverV2`** (`pkg/sendspin/v2_client.go`): `secure.ClientHandshake` →
+  `session.EstablishClient` (verifies the player role is active) → 8-sample
+  clock-sync bursts before reporting availability → `stream/start`/`clear`/
+  `end` (incl. `from_timestamp` partial clears) → pcm/opus/flac decode →
+  scheduler → `Output()`. Parses the 13-byte audio header; `send_ahead` is
+  read and ignored for scheduling per spec. Handles `server/state` metadata,
+  `server/command` (volume/mute/output_delay), `server/unpair`, and
+  clock-sync-loss degradation.
+- **`PlayerV2`** (`pkg/sendspin/v2_player.go`): output backend, controller
+  commands (play/pause/next/previous/seek), volume/mute synced to the server,
+  and reconnect/backoff with rediscover.
+- `session` registry gained `server/state` (metadata/controller objects).
+- Fix flushed out by the tests: v2 server `StreamGroup` no longer derefs a
+  vanished group.
+- Tests: encrypted loopback streams a tone → verified decoded output with
+  ~20 ms-spaced timestamps; sync+availability ordering; PlayerV2 volume/mute.
+- The legacy `pkg/protocol/client.go` cleartext path is left frozen; the
+  binaries can move to `ReceiverV2`/`PlayerV2` at the cutover.
 
 ### 4. Merge (only after 1–3 are green + reviewed)
 - Merge `feat/protocol-and-stability` into `feat/spec-v2-current` (mostly

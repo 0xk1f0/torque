@@ -197,6 +197,35 @@ func (s *Scheduler) Clear() {
 	log.Printf("Scheduler buffers cleared, re-entering buffering mode")
 }
 
+// ClearSince drops buffered audio at or after fromTimestamp (server clock), the
+// spec's stream/clear from_timestamp semantics: audio strictly before the time
+// keeps playing, at-or-after is discarded.
+func (s *Scheduler) ClearSince(fromTimestamp int64) {
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
+
+	items := make([]audio.Buffer, 0, s.bufferQ.Len())
+	for s.bufferQ.Len() > 0 {
+		items = append(items, heap.Pop(s.bufferQ).(audio.Buffer))
+	}
+	kept := make([]audio.Buffer, 0, len(items))
+	dropped := 0
+	for _, b := range items {
+		if b.Timestamp >= fromTimestamp {
+			dropped++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	s.bufferQ = NewBufferQueue()
+	for _, b := range kept {
+		heap.Push(s.bufferQ, b)
+	}
+	s.dropped.Add(int64(dropped))
+	log.Printf("Scheduler cleared %d buffered chunks at/after ts=%dµs; %d kept",
+		dropped, fromTimestamp, len(kept))
+}
+
 type BufferQueue struct {
 	items []audio.Buffer
 }

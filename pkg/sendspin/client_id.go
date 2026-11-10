@@ -128,3 +128,14 @@ func isZeroMAC(mac net.HardwareAddr) bool {
 func isBroadcastMAC(mac net.HardwareAddr) bool {
 	return bytes.Equal(mac, []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
 }
+
+// pickStableMACOrEmpty returns the primary interface MAC in lowercase
+// colon-separated form (aa:bb:cc:dd:ee:ff), or "" when no stable MAC can be
+// picked. Used to populate device_info.mac_address per the Sendspin spec.
+func pickStableMACOrEmpty() string {
+	mac, ok := pickStableMAC(allInterfaces())
+	if !ok {
+		return ""
+	}
+	return mac
+}

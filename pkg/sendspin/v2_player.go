@@ -1,0 +1,373 @@
+// ABOUTME: High-level spec-v2 Player — composes ReceiverV2 with an audio
+// ABOUTME: output backend, volume/mute, transport commands, and automatic
+// ABOUTME: reconnect with backoff.
+package sendspin
+
+import (
+	"context"
+	"fmt"
+	"log"
+	stdsync "sync"
+	"time"
+
+	"github.com/Sendspin/sendspin-go/pkg/audio"
+	"github.com/Sendspin/sendspin-go/pkg/audio/output"
+	"github.com/Sendspin/sendspin-go/pkg/protocol/session"
+)
+
+// PlayerV2 plays audio from a spec-v2 server over the encrypted wire. It
+// mirrors the legacy Player's surface: Connect/Play/Pause/Stop/Seek,
+// SetVolume/Mute, Status, Close, and configurable reconnect. V2Config.Output
+// selects the playback backend (nil = miniaudio default).
+type PlayerV2 struct {
+	config V2Config
+	recv   *ReceiverV2
+	out    output.Output
+
+	state   PlayerState
+	stateMu stdsync.Mutex
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	capsResolved bool
+}
+
+// NewPlayerV2 builds a spec-v2 Player.
+func NewPlayerV2(config V2Config) (*PlayerV2, error) {
+	if config.BufferMs == 0 {
+		config.BufferMs = 500
+	}
+	if config.Reconnect.Enabled {
+		if config.Reconnect.InitialDelay <= 0 {
+			config.Reconnect.InitialDelay = 500 * time.Millisecond
+		}
+		if config.Reconnect.MaxDelay <= 0 {
+			config.Reconnect.MaxDelay = 30 * time.Second
+		}
+		if config.Reconnect.Multiplier <= 1.0 {
+			config.Reconnect.Multiplier = 2.0
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &PlayerV2{
+		config: config,
+		ctx:    ctx,
+		cancel: cancel,
+		state: PlayerState{
+			State:     "idle",
+			Volume:    100,
+			Muted:     false,
+			Connected: false,
+		},
+	}, nil
+}
+
+// Connect dials the server and starts the playback pipeline.
+func (p *PlayerV2) Connect() error {
+	p.ensureCapsResolved()
+	cfg := p.config
+	cfg.OnStreamStart = p.onStreamStart
+	cfg.OnStreamEnd = p.onStreamEnd
+	cfg.OnCommand = func(cmd session.PlayerCommand) {
+		switch cmd.Command {
+		case session.PlayerCmdVolume:
+			if cmd.Volume != nil {
+				_ = p.SetVolume(*cmd.Volume)
+			}
+		case session.PlayerCmdMute:
+			if cmd.Mute != nil {
+				_ = p.Mute(*cmd.Mute)
+			}
+		case session.PlayerCmdSetOutputDelay:
+			// Ignore in the high-level player; OutputDelayMs is static here.
+		}
+	}
+	cfg.Output = nil
+
+	recv, err := NewReceiverV2(cfg)
+	if err != nil {
+		return err
+	}
+	if err := recv.Connect(); err != nil {
+		return err
+	}
+	p.recv = recv
+	p.setState(func(s *PlayerState) { s.Connected = true; s.State = "idle" })
+
+	go p.consumeAudio(recv)
+
+	if cfg.Reconnect.Enabled {
+		go p.runReconnectLoop(recv)
+	}
+	return nil
+}
+
+// ensureCapsResolved caps the advertised formats from the output device on
+// first use (as the legacy player does).
+func (p *PlayerV2) ensureCapsResolved() {
+	if p.capsResolved {
+		return
+	}
+	p.capsResolved = true
+	if p.config.MaxSampleRate != 0 || p.config.MaxBitDepth != 0 || p.config.Output != nil {
+		return
+	}
+	rate, depth, err := output.QueryDeviceCapabilities("")
+	if err != nil || rate == 0 {
+		return
+	}
+	p.config.MaxSampleRate = rate
+	p.config.MaxBitDepth = depth
+}
+
+// onStreamStart opens the output at the negotiated format.
+func (p *PlayerV2) onStreamStart(format audio.Format) {
+	if p.out == nil {
+		p.out = p.config.Output
+		if p.out == nil {
+			p.out = output.NewMalgo("")
+		}
+	}
+	if err := p.out.Open(format.SampleRate, format.Channels, format.BitDepth); err != nil {
+		p.notifyError(fmt.Errorf("v2: open output: %w", err))
+		return
+	}
+	p.stateMu.Lock()
+	vol, mut := p.state.Volume, p.state.Muted
+	p.state.Codec = format.Codec
+	p.state.SampleRate = format.SampleRate
+	p.state.Channels = format.Channels
+	p.state.BitDepth = format.BitDepth
+	p.state.State = "playing"
+	p.stateMu.Unlock()
+	p.out.SetVolume(vol)
+	p.out.SetMuted(mut)
+	p.notifyStateChange()
+}
+
+func (p *PlayerV2) onStreamEnd() {
+	p.setState(func(s *PlayerState) { s.State = "idle" })
+}
+
+func (p *PlayerV2) consumeAudio(recv *ReceiverV2) {
+	for {
+		select {
+		case buf, ok := <-recv.Output():
+			if !ok {
+				return
+			}
+			if p.out != nil {
+				if err := p.out.Write(buf.Samples); err != nil {
+					p.notifyError(fmt.Errorf("v2: playback error: %w", err))
+				}
+			}
+		case <-recv.Done():
+			return
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
+// runReconnectLoop supervises the active receiver and rebuilds it with
+// exponential backoff whenever its Done channel closes.
+func (p *PlayerV2) runReconnectLoop(initial *ReceiverV2) {
+	current := initial
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-current.Done():
+		}
+		p.setState(func(s *PlayerState) { s.Connected = false; s.State = "reconnecting" })
+
+		next, ok := p.reconnectWithBackoff()
+		if !ok {
+			return
+		}
+		current = next
+		p.stateMu.Lock()
+		p.recv = next
+		p.stateMu.Unlock()
+		p.setState(func(s *PlayerState) { s.Connected = true })
+		go p.consumeAudio(next)
+	}
+}
+
+func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
+	cfg := p.config.Reconnect
+	delay := cfg.InitialDelay
+	attempt := 0
+	for {
+		attempt++
+		if cfg.MaxAttempts > 0 && attempt > cfg.MaxAttempts {
+			p.notifyError(fmt.Errorf("v2 reconnect: gave up after %d attempts", cfg.MaxAttempts))
+			return nil, false
+		}
+		jittered := jitter(delay, 0.2)
+		log.Printf("V2 reconnect attempt %d in %v", attempt, jittered)
+		select {
+		case <-p.ctx.Done():
+			return nil, false
+		case <-time.After(jittered):
+		}
+		cfg2 := p.config
+		cfg2.Output = nil
+		if cfg.Rediscover != nil {
+			if addr, err := cfg.Rediscover(p.ctx); err == nil && addr != "" {
+				cfg2.ServerAddr = addr
+			}
+		}
+		recv, err := NewReceiverV2(cfg2)
+		if err == nil {
+			if err = recv.Connect(); err == nil {
+				log.Printf("V2 reconnect: connected to %s on attempt %d", cfg2.ServerAddr, attempt)
+				return recv, true
+			}
+		}
+		log.Printf("V2 reconnect attempt %d failed: %v", attempt, err)
+		delay = time.Duration(float64(delay) * cfg.Multiplier)
+		if delay > cfg.MaxDelay {
+			delay = cfg.MaxDelay
+		}
+	}
+}
+
+// Play/Pause/Stop send controller commands.
+func (p *PlayerV2) Play() error  { return p.sendController(session.CmdPlay) }
+func (p *PlayerV2) Pause() error { return p.sendController(session.CmdPause) }
+func (p *PlayerV2) Stop() error  { return p.sendController(session.CmdStop) }
+
+// Next / Previous send track commands.
+func (p *PlayerV2) Next() error     { return p.sendController(session.CmdNext) }
+func (p *PlayerV2) Previous() error { return p.sendController(session.CmdPrevious) }
+
+// Seek jumps to a position in ms.
+func (p *PlayerV2) Seek(positionMs int) error {
+	return p.sendCtl(session.ControllerCommand{Command: session.CmdSeek, PositionMs: &positionMs})
+}
+
+// SeekRelative offsets the position by offsetMs.
+func (p *PlayerV2) SeekRelative(offsetMs int) error {
+	return p.sendCtl(session.ControllerCommand{Command: session.CmdSeekRelative, OffsetMs: &offsetMs})
+}
+
+func (p *PlayerV2) sendController(cmd session.MediaCommand) error {
+	return p.sendCtl(session.ControllerCommand{Command: cmd})
+}
+
+func (p *PlayerV2) sendCtl(cmd session.ControllerCommand) error {
+	p.stateMu.Lock()
+	recv := p.recv
+	p.stateMu.Unlock()
+	if recv == nil {
+		return fmt.Errorf("not connected")
+	}
+	if err := recv.SendControllerCommand(cmd); err != nil {
+		return err
+	}
+	p.setState(func(s *PlayerState) {
+		switch cmd.Command {
+		case session.CmdPlay:
+			s.State = "playing"
+		case session.CmdPause:
+			s.State = "paused"
+		case session.CmdStop:
+			s.State = "idle"
+		}
+	})
+	return nil
+}
+
+// SetVolume sets the local volume (0-100) and reports it to the server.
+func (p *PlayerV2) SetVolume(volume int) error {
+	if volume < 0 {
+		volume = 0
+	}
+	if volume > 100 {
+		volume = 100
+	}
+	p.stateMu.Lock()
+	p.state.Volume = volume
+	out := p.out
+	recv := p.recv
+	p.stateMu.Unlock()
+	if out != nil {
+		out.SetVolume(volume)
+	}
+	if recv != nil {
+		recv.SetVolume(volume)
+	}
+	p.notifyStateChange()
+	return nil
+}
+
+// Mute sets local mute and reports it to the server.
+func (p *PlayerV2) Mute(muted bool) error {
+	p.stateMu.Lock()
+	p.state.Muted = muted
+	out := p.out
+	recv := p.recv
+	vol := p.state.Volume
+	p.stateMu.Unlock()
+	if out != nil {
+		out.SetMuted(muted)
+		if !muted {
+			out.SetVolume(vol)
+		}
+	}
+	if recv != nil {
+		recv.SetMuted(muted)
+	}
+	p.notifyStateChange()
+	return nil
+}
+
+// Status returns the current player state.
+func (p *PlayerV2) Status() PlayerState {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return p.state
+}
+
+// Close shuts the player down.
+func (p *PlayerV2) Close() error {
+	p.cancel()
+	p.stateMu.Lock()
+	recv := p.recv
+	out := p.out
+	p.stateMu.Unlock()
+	if recv != nil {
+		_ = recv.Close()
+	}
+	if out != nil {
+		_ = out.Close()
+	}
+	p.setState(func(s *PlayerState) { s.Connected = false; s.State = "idle" })
+	return nil
+}
+
+func (p *PlayerV2) setState(mut func(*PlayerState)) {
+	p.stateMu.Lock()
+	mut(&p.state)
+	p.stateMu.Unlock()
+	p.notifyStateChange()
+}
+
+func (p *PlayerV2) notifyStateChange() {
+	p.stateMu.Lock()
+	s := p.state
+	p.stateMu.Unlock()
+	if p.config.OnStateChange != nil {
+		p.config.OnStateChange(s)
+	}
+}
+
+func (p *PlayerV2) notifyError(err error) {
+	if p.config.OnError != nil {
+		p.config.OnError(err)
+	} else {
+		log.Printf("V2 player: %v", err)
+	}
+}

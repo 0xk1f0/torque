@@ -147,6 +147,43 @@ type Pairing struct {
 	Format *PairingFormat `json:"format,omitempty"`
 }
 
+// ServerState is the server→client server/state message, carrying role-specific
+// state objects (metadata, controller, …). Only the objects the connection's
+// active roles define may appear.
+type ServerState struct {
+	Metadata   *MetadataState   `json:"metadata,omitempty"`
+	Controller *ControllerState `json:"controller,omitempty"`
+}
+
+// ControllerState is the controller object of server/state.
+type ControllerState struct {
+	SupportedCommands []string `json:"supported_commands"`
+	Volume            *int     `json:"volume,omitempty"`
+	Muted             *bool    `json:"muted,omitempty"`
+	SeekMaxMs         *int     `json:"seek_max_ms,omitempty"`
+}
+
+// MetadataState is the metadata object of server/state. Strings are pointers
+// so an omitted key can mean "unchanged" to a delta-merge.
+type MetadataState struct {
+	Timestamp   int64            `json:"timestamp"`
+	Title       *string          `json:"title,omitempty"`
+	Artist      *string          `json:"artist,omitempty"`
+	AlbumArtist *string          `json:"album_artist,omitempty"`
+	Album       *string          `json:"album,omitempty"`
+	ArtworkURL  *string          `json:"artwork_url,omitempty"`
+	Year        *int             `json:"year,omitempty"`
+	Track       *int             `json:"track,omitempty"`
+	Progress    *SessionProgress `json:"progress,omitempty"`
+}
+
+// SessionProgress is the metadata object's playback progress.
+type SessionProgress struct {
+	TrackProgress int `json:"track_progress"`
+	TrackDuration int `json:"track_duration"`
+	PlaybackSpeed int `json:"playback_speed"`
+}
+
 // ServerActivate declares the server's current purpose on the connection.
 // ActiveRoles uses a pointer to distinguish "omitted, persist previous"
 // (nil) from "explicitly empty" (&[]string{}).
@@ -238,6 +275,8 @@ func typeOf(v any) (string, error) {
 		return "stream/end", nil
 	case ClientCommand, *ClientCommand:
 		return "client/command", nil
+	case ServerState, *ServerState:
+		return "server/state", nil
 	case ServerCommand, *ServerCommand:
 		return "server/command", nil
 	case ClientPairPending, *ClientPairPending:
@@ -317,6 +356,8 @@ func Parse(raw []byte) (any, error) {
 		v = &ClientCommand{}
 	case "server/command":
 		v = &ServerCommand{}
+	case "server/state":
+		v = &ServerState{}
 	case "client/pair-pending":
 		v = &ClientPairPending{}
 	case "client/pair-init":

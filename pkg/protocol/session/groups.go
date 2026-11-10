@@ -436,6 +436,18 @@ func (m *GroupManager) SetGroupMute(groupID string, muted bool) error {
 	return flush(sends)
 }
 
+// Available reports whether the client has reported available:true (i.e. the
+// server may start its stream). Useful before starting playback in tests and
+// orchestration layers.
+func (m *GroupManager) Available(clientID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mi := m.members[clientID]; mi != nil {
+		return mi.available
+	}
+	return false
+}
+
 // GroupID returns the client's current group_id, or "" if unknown.
 func (m *GroupManager) GroupID(clientID string) string {
 	m.mu.Lock()

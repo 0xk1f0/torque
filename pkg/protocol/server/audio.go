@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/Sendspin/sendspin-go/pkg/audio"
@@ -65,8 +66,13 @@ func (s *Server) StreamGroup(ctx context.Context, groupID string, src Source, op
 	frame := make([]int32, f.SampleRate*ChunkDurationMs/1000*f.Channels)
 
 	// The next chunk's playback timestamp, seeded a send-ahead window ahead of
-	// now so the first chunk has its full lead.
-	nextTS := s.clock() + int64(s.groups.GroupByID(groupID).SendAheadMs())*1000
+	// now so the first chunk has its full lead. A group can vanish mid-stream
+	// (all members left); stop cleanly rather than dereferencing it.
+	g := s.groups.GroupByID(groupID)
+	if g == nil {
+		return nil
+	}
+	nextTS := s.clock() + int64(g.SendAheadMs())*1000
 
 	t := time.NewTicker(tick)
 	defer t.Stop()
@@ -76,7 +82,12 @@ func (s *Server) StreamGroup(ctx context.Context, groupID string, src Source, op
 			return ctx.Err()
 		case <-t.C:
 			now := s.clock()
-			horizon := now + int64(s.groups.GroupByID(groupID).SendAheadMs())*1000
+			g := s.groups.GroupByID(groupID)
+			if g == nil {
+				log.Printf("StreamGroup %s: group gone; stopping", groupID)
+				return nil
+			}
+			horizon := now + int64(g.SendAheadMs())*1000
 			for nextTS <= horizon {
 				more, err := s.pumpChunk(groupID, src, frame, f.BitDepth, now, nextTS)
 				if err != nil {

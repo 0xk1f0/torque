@@ -16,7 +16,20 @@ type ClockSync struct {
 	quality     Quality
 	lastSync    time.Time
 	sampleCount int
+
+	// staleAfter is how long with no successful sync response before
+	// CheckQuality reports QualityLost. Defaults to syncStaleAfter.
+	staleAfter time.Duration
+
+	// now reports the current time; overridable in tests via SetClock to
+	// advance time deterministically.
+	now func() time.Time
 }
+
+// syncStaleAfter is the default staleness window for CheckQuality: if no
+// client/time response has been processed for this long, the filter's mapping
+// can no longer be trusted and quality drops to QualityLost.
+const syncStaleAfter = 5 * time.Second
 
 type Quality int
 
@@ -53,9 +66,27 @@ func NewClockSync() *ClockSync {
 // NewClockSyncWithConfig creates a ClockSync with a custom filter configuration.
 func NewClockSyncWithConfig(cfg TimeFilterConfig) *ClockSync {
 	return &ClockSync{
-		filter:  NewTimeFilter(cfg),
-		quality: QualityLost,
+		filter:     NewTimeFilter(cfg),
+		quality:    QualityLost,
+		staleAfter: syncStaleAfter,
+		now:        time.Now,
 	}
+}
+
+// SetClock overrides the clock used for timestamps, letting tests advance time
+// deterministically. Pass time.Now to restore the wall clock.
+func (cs *ClockSync) SetClock(now func() time.Time) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.now = now
+}
+
+// SetStaleAfter overrides how long without a fresh sync response before
+// CheckQuality reports QualityLost. Intended for tests; the default is 5s.
+func (cs *ClockSync) SetStaleAfter(d time.Duration) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.staleAfter = d
 }
 
 // ProcessSyncResponse processes a server/time response.
@@ -68,7 +99,7 @@ func (cs *ClockSync) ProcessSyncResponse(t1, t2, t3, t4 int64) {
 	defer cs.mu.Unlock()
 
 	cs.rtt = rtt
-	cs.lastSync = time.Now()
+	cs.lastSync = cs.now()
 
 	// NTP-style offset and uncertainty.
 	measurement := ((t2 - t1) + (t3 - t4)) / 2
@@ -97,11 +128,27 @@ func (cs *ClockSync) CheckQuality() Quality {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	if time.Since(cs.lastSync) > 5*time.Second {
+	if cs.now().Sub(cs.lastSync) > cs.staleAfter {
 		cs.quality = QualityLost
 	}
 
 	return cs.quality
+}
+
+// TimeSinceLastSync returns how long ago the most recent successful sync
+// response was processed, using the configured clock, without mutating quality.
+func (cs *ClockSync) TimeSinceLastSync() time.Duration {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.now().Sub(cs.lastSync)
+}
+
+// Synced reports whether the time filter has processed at least one
+// measurement (an established baseline, as opposed to never synced).
+func (cs *ClockSync) Synced() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.filter.Synced()
 }
 
 // ServerToLocalTime converts server timestamp (µs) to local wall clock time.
