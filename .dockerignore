@@ -1,0 +1,10 @@
+# Keep the build context small for the multi-platform Docker builds.
+.git
+.github
+dist
+*.log
+*.exe
+sendspin-*
+Dockerfile
+.precision*
+.venv
