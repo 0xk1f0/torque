@@ -29,7 +29,7 @@ func TestRehandshake_SwapsKeysInBand(t *testing.T) {
 
 	// Server initiates; client sees the noise/handshake frame and responds.
 	errCh := make(chan error, 1)
-	go func() { errCh <- serverConn.RehandshakeInitiate(newPSK) }()
+	go func() { errCh <- serverConn.RehandshakeInitiate(newPSK, CategoryLongTerm) }()
 
 	msgType, payload, err := clientConn.ReadMessage()
 	if err != nil {
@@ -41,7 +41,7 @@ func TestRehandshake_SwapsKeysInBand(t *testing.T) {
 	if msgType != MsgTypeJSON || json.Unmarshal(payload, &env) != nil || env.Type != "noise/handshake" {
 		t.Fatalf("expected noise/handshake frame, got type %d %.60s", msgType, payload)
 	}
-	err = clientConn.RehandshakeRespond(payload, func(id string) (PSK, bool) {
+	err = clientConn.RehandshakeRespond(payload, func(id string, _ PSKCategoryCode) (PSK, bool) {
 		if id != newPSK.ID() {
 			t.Errorf("rehandshake announced psk_id %q, want %q", id, newPSK.ID())
 			return PSK{}, false
@@ -99,14 +99,14 @@ func TestRehandshake_WrongPSKFails(t *testing.T) {
 	wrong, _ := NewPSK()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- serverConn.RehandshakeInitiate(newPSK) }()
+	go func() { errCh <- serverConn.RehandshakeInitiate(newPSK, CategoryLongTerm) }()
 
 	_, payload, err := clientConn.ReadMessage()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Client resolves the right psk_id to the wrong bytes.
-	if err := clientConn.RehandshakeRespond(payload, func(string) (PSK, bool) { return wrong, true }); err != nil {
+	if err := clientConn.RehandshakeRespond(payload, func(_ string, _ PSKCategoryCode) (PSK, bool) { return wrong, true }); err != nil {
 		t.Fatalf("responder side: %v", err)
 	}
 	if err := <-errCh; err == nil {

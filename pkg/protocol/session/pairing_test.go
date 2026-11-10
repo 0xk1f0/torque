@@ -42,9 +42,11 @@ func pairedLoopback(t *testing.T, pairingPSK secure.PSK) (serverConn, clientConn
 	clientID, _ := secure.GenerateIdentity()
 
 	srvConnCh := make(chan *secure.Conn, 1)
-	srv := startSecureLoopback(t, serverID, func(string) (secure.PSK, error) { return pairingPSK, nil }, srvConnCh)
+	srv := startSecureLoopback(t, serverID, func(string) (secure.PSK, secure.PSKCategoryCode, error) {
+		return pairingPSK, secure.CategoryPairing, nil
+	}, srvConnCh)
 
-	clientConn = dialSecure(t, srv, clientID, func(pskID string) (secure.PSK, bool) {
+	clientConn = dialSecure(t, srv, clientID, func(pskID string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
 		if pskID == pairingPSK.ID() {
 			return pairingPSK, true
 		}

@@ -35,7 +35,7 @@ func acceptHarness(t *testing.T, cfg ServerAcceptConfig) (*httptest.Server, <-ch
 	return srv, results, errs
 }
 
-func dialClient(t *testing.T, srv *httptest.Server, id *secure.Identity, selectPSK func(string) (secure.PSK, bool)) *secure.Conn {
+func dialClient(t *testing.T, srv *httptest.Server, id *secure.Identity, selectPSK func(string, secure.PSKCategoryCode) (secure.PSK, bool)) *secure.Conn {
 	t.Helper()
 	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
@@ -138,8 +138,10 @@ func TestAccept_PairThenReconnectAsPaired(t *testing.T) {
 			return
 		}
 		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{
-			Identity:  serverID,
-			SelectPSK: func(string) (secure.PSK, error) { return pairingPSK, nil },
+			Identity: serverID,
+			SelectPSK: func(string) (secure.PSK, secure.PSKCategoryCode, error) {
+				return pairingPSK, secure.CategoryPairing, nil
+			},
 		})
 		if err != nil {
 			pairDone <- err
@@ -166,7 +168,7 @@ func TestAccept_PairThenReconnectAsPaired(t *testing.T) {
 	}
 	pconn, _, err := secure.ClientHandshake(wsc, secure.ClientHandshakeConfig{
 		Identity: clientID,
-		SelectPSK: func(id string) (secure.PSK, bool) {
+		SelectPSK: func(id string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
 			if id == pairingPSK.ID() {
 				return pairingPSK, true
 			}
@@ -205,7 +207,7 @@ func TestAccept_PairThenReconnectAsPaired(t *testing.T) {
 		Store:      serverStore,
 	})
 
-	conn := dialClient(t, srv, clientID, func(pskID string) (secure.PSK, bool) {
+	conn := dialClient(t, srv, clientID, func(pskID string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
 		// Client resolves the server's psk_id against its own record.
 		if pskID == longTerm.ID() {
 			return longTerm, true

@@ -52,8 +52,8 @@ func TestFragment_BoundarySizes(t *testing.T) {
 		{1, 1},
 		{maxSingleFramePayload, 1},     // largest unfragmented message
 		{maxSingleFramePayload + 1, 2}, // smallest fragmented message
-		{maxOpeningFragmentData + maxContinuationData, 2},
-		{maxOpeningFragmentData + maxContinuationData + 1, 3},
+		{maxOpeningFragmentData + maxFragmentData, 2},
+		{maxOpeningFragmentData + maxFragmentData + 1, 3},
 	}
 	for _, tc := range cases {
 		payload := bytes.Repeat([]byte{0xAB}, tc.size)
@@ -83,20 +83,21 @@ func TestFragment_LargeMessageWireShape(t *testing.T) {
 	if len(frames) < 4 {
 		t.Fatalf("200kB message produced only %d frames", len(frames))
 	}
-	if frames[0][0] != MsgTypeFragmentMore || frames[0][1] != 0x09 {
-		t.Errorf("opening frame prefix = [%d %d], want [2 9]", frames[0][0], frames[0][1])
+	// First fragment: [1][flags=first(0x02)][orig_type][data].
+	if frames[0][0] != MsgTypeFragment || frames[0][1] != fragFlagFirst || frames[0][2] != 0x09 {
+		t.Errorf("first fragment prefix = [%d %d %d], want [1 2 9]", frames[0][0], frames[0][1], frames[0][2])
 	}
 	for i := 1; i < len(frames)-1; i++ {
-		if frames[i][0] != MsgTypeFragmentMore {
-			t.Errorf("continuation frame %d type = %d, want 2", i, frames[i][0])
+		if frames[i][0] != MsgTypeFragment || frames[i][1]&(fragFlagFirst|fragFlagLast) != 0 {
+			t.Errorf("continuation frame %d = [%d %d], want type 1 with no first/last flags", i, frames[i][0], frames[i][1])
 		}
 	}
 	last := frames[len(frames)-1]
-	if last[0] != MsgTypeFragmentEnd {
-		t.Errorf("closing frame type = %d, want 3", last[0])
+	if last[0] != MsgTypeFragment || last[1] != fragFlagLast {
+		t.Errorf("last fragment = [%d %d], want [1 1]", last[0], last[1])
 	}
-	if len(last) < 2 {
-		t.Error("closing frame carries no data")
+	if len(last) < 3 {
+		t.Error("last fragment carries no data")
 	}
 
 	msgType, back := reassemble(t, frames)
@@ -137,16 +138,16 @@ func TestFragment_ThroughEncryptedSession(t *testing.T) {
 }
 
 func TestReassembler_Violations(t *testing.T) {
-	t.Run("fragment-end without start", func(t *testing.T) {
+	t.Run("continuation without a first fragment", func(t *testing.T) {
 		r := NewReassembler(0)
-		if _, _, _, err := r.Feed([]byte{MsgTypeFragmentEnd, 0x01}); err == nil {
-			t.Error("orphan fragment-end accepted")
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, 0x00, 0x01}); err == nil {
+			t.Error("orphan continuation fragment accepted")
 		}
 	})
 
 	t.Run("non-fragment frame mid-flight", func(t *testing.T) {
 		r := NewReassembler(0)
-		if _, _, _, err := r.Feed([]byte{MsgTypeFragmentMore, MsgTypeJSON, 0x01}); err != nil {
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, fragFlagFirst, MsgTypeJSON, 0x01}); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, _, err := r.Feed([]byte{0x04, 0x00}); err == nil {
@@ -161,27 +162,58 @@ func TestReassembler_Violations(t *testing.T) {
 		}
 	})
 
-	t.Run("opening frame without orig_type", func(t *testing.T) {
+	t.Run("first fragment missing orig_type", func(t *testing.T) {
 		r := NewReassembler(0)
-		if _, _, _, err := r.Feed([]byte{MsgTypeFragmentMore}); err == nil {
-			t.Error("opening fragment without orig_type accepted")
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, fragFlagFirst}); err == nil {
+			t.Error("first fragment without orig_type accepted")
+		}
+	})
+
+	t.Run("fragment missing flags byte", func(t *testing.T) {
+		r := NewReassembler(0)
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment}); err == nil {
+			t.Error("fragment without a flags byte accepted")
+		}
+	})
+
+	t.Run("reserved flag bits rejected", func(t *testing.T) {
+		r := NewReassembler(0)
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, fragFlagFirst | 0x80, MsgTypeJSON, 0x00}); err == nil {
+			t.Error("reserved fragment flag bit accepted")
+		}
+	})
+
+	t.Run("orig_type of fragment type rejected", func(t *testing.T) {
+		r := NewReassembler(0)
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, fragFlagFirst, MsgTypeFragment, 0x00}); err == nil {
+			t.Error("fragment with orig_type 1 accepted")
+		}
+	})
+
+	t.Run("second first fragment mid-flight", func(t *testing.T) {
+		r := NewReassembler(0)
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, fragFlagFirst, 0x09, 0x01}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, fragFlagFirst, 0x0A, 0x01}); err == nil {
+			t.Error("second first fragment while one is in flight accepted")
 		}
 	})
 
 	t.Run("oversized reassembly", func(t *testing.T) {
 		r := NewReassembler(16)
-		if _, _, _, err := r.Feed(append([]byte{MsgTypeFragmentMore, MsgTypeJSON}, make([]byte, 10)...)); err != nil {
+		if _, _, _, err := r.Feed(append([]byte{MsgTypeFragment, fragFlagFirst, MsgTypeJSON}, make([]byte, 10)...)); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, _, err := r.Feed(append([]byte{MsgTypeFragmentEnd}, make([]byte, 10)...)); err == nil {
+		if _, _, _, err := r.Feed(append([]byte{MsgTypeFragment, fragFlagLast}, make([]byte, 10)...)); err == nil {
 			t.Error("reassembly over the size limit accepted")
 		}
 	})
 
 	t.Run("usable after violation reset", func(t *testing.T) {
 		r := NewReassembler(0)
-		if _, _, _, err := r.Feed([]byte{MsgTypeFragmentEnd, 0x01}); err == nil {
-			t.Fatal("orphan fragment-end accepted")
+		if _, _, _, err := r.Feed([]byte{MsgTypeFragment, 0x00, 0x01}); err == nil {
+			t.Fatal("orphan continuation fragment accepted")
 		}
 		msgType, payload, done, err := r.Feed([]byte{MsgTypeJSON, '{', '}'})
 		if err != nil || !done || msgType != MsgTypeJSON || string(payload) != "{}" {

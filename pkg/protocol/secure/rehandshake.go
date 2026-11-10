@@ -11,9 +11,10 @@ import (
 // the current transport channel, swapping to psk. Per spec: client/init and
 // server/init are not re-sent; identity, peer, and suite carry over; the new
 // prologue is the prior handshake's hash h; the two noise/handshake messages
-// travel as encrypted JSON frames. No other messages may flow during the
-// exchange — the caller must be at a quiescent point in the conversation.
-func (c *Conn) RehandshakeInitiate(psk PSK) error {
+// (again carrying psk_id + psk_category) travel as encrypted JSON frames. No
+// other messages may flow during the exchange — the caller must be at a
+// quiescent point in the conversation.
+func (c *Conn) RehandshakeInitiate(psk PSK, category PSKCategoryCode) error {
 	init, err := NewInitiator(InitiatorConfig{
 		Identity:      c.identity,
 		PeerPublicKey: c.peerPub,
@@ -24,7 +25,7 @@ func (c *Conn) RehandshakeInitiate(psk PSK) error {
 	if err != nil {
 		return err
 	}
-	msg1, err := init.Message1(psk.ID())
+	msg1, err := init.Message1(psk.ID(), category)
 	if err != nil {
 		return err
 	}
@@ -77,8 +78,9 @@ func isNoiseEnvelope(raw []byte) bool {
 // RehandshakeRespond completes a re-handshake from the client side. The
 // caller has already read the first noise/handshake envelope from the
 // channel (message1Envelope is its raw JSON); selectPSK maps the announced
-// psk_id to the new PSK.
-func (c *Conn) RehandshakeRespond(message1Envelope []byte, selectPSK func(pskID string) (PSK, bool)) error {
+// psk_id + psk_category to the new PSK. Sentinel fallback never applies to a
+// re-handshake: a miss fails it.
+func (c *Conn) RehandshakeRespond(message1Envelope []byte, selectPSK func(pskID string, category PSKCategoryCode) (PSK, bool)) error {
 	msg1, err := ParseNoiseHandshake(message1Envelope)
 	if err != nil {
 		return err

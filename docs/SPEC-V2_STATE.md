@@ -49,33 +49,33 @@ Full repo green under `-race`.
 
 ## Remaining (audit-verified, in priority order)
 
-### 1. Secure transport (INTEROP-CRITICAL — a spec peer rejects these today)
-- **`psk_category` in the Noise message-1 payload** (`secure/handshake.go`):
-  message 1 must carry `psk_id` *and* `psk_category` (`'lt'|'pr'|'sn'`); the
-  client selects the PSK by category, and a `psk_id` held under a different
-  category is a lookup miss.
-- **Client Sentinel fallback** (`handshake.go:Accept`): on an initial-handshake
-  `psk_id` miss the client completes noise message 2 with the Sentinel PSK
-  instead of failing.
-- **Server credential-mismatch path** (`secure/conn.go`): re-verify noise
-  message 2 under the Sentinel when the referenced PSK fails (and wasn't the
-  Sentinel itself); a Sentinel-validated message 2 ⇒ authenticated
-  credential-mismatch ⇒ session is pairing-only (no role activation, no
-  `'playback'` while a record exists). Neither side may remove the record.
-- **`server/error` init failures** (`secure` accept path): send
-  `server/error` with `unsupported_version`/`unsupported_suite`/`malformed`
-  for `client/init` failures, checking `version` before `suite` before other
-  fields, then close.
-- **Re-handshake discipline** (`secure/rehandshake.go`, `session/pairing.go`,
-  `session/pin_pairing.go`): after a post-pairing re-handshake the server MUST
-  send `server/activate` as its first new-key message and must NOT re-send
-  `server/hello`/`client/hello`; the activation is a "subsequent" one with
-  `active_roles` omission semantics.
-- **Fragmentation wire format** (`secure/frame.go`): use type `1` with
-  `[1][flags][orig_type][data]` / `[1][flags][data]` (bit 1 = first, bit 0 =
-  last, reserved bits zero); the current `MsgTypeFragmentMore/End = 2/3`
-  format is non-spec. Keep the 65518-byte Noise-payload limit.
-- Empty-plaintext / malformed-sequence close rules are already present ✅.
+### 1. Secure transport — DONE on this branch (committed)
+- `psk_category` in noise message 1 (`lt`/`pr`/`sn`): server announces the
+  matched PSK's category; the client selects by (psk_id, category); a psk_id
+  held under a different category is a lookup miss; unknown categories are
+  malformed.
+- Client **Sentinel fallback** on an initial-handshake lookup miss
+  (`Responder.Accept` / `ClientHandshake`, opt-out via `SentinelFallback`);
+  re-handshakes never fall back.
+- **`server/error`** init failures: classified
+  `unsupported_version`/`unsupported_suite`/`malformed` (version before
+  suite), sent over the cleartext preamble, then close.
+- **Fragmentation** rewritten to the spec wire format: type-1 frames with a
+  flags byte (`[1][flags][orig_type][data]`, bit1 first, bit0 last, reserved
+  zero) and full malformed-sequence enforcement.
+- **Re-handshake discipline**: `ServerSession.Promote` sends `server/activate`
+  as the first new-key message and no longer re-sends
+  `server/hello`/`client/hello`; `ClientSession.CompletePromotion` reads that
+  activation (admissible at long-term trust) without re-sending client/hello.
+
+**Known limitation (documented, not hidden):** the server-side credential-
+mismatch re-verify — retrying noise message 2 under the Sentinel when a
+non-Sentinel selected PSK fails — is not expressible with `flynn/noise` (the
+PSK is fixed at state creation and each state draws a fresh ephemeral, so one
+msg1 cannot be verified against two PSKs). A lost-record client that falls
+back is therefore dropped by this server; it would recover against a spec
+peer (e.g. aiosendspin) that implements the re-verify. This is the only §1
+item left, and it needs a handshake-level PSK swap this library can't do.
 
 ### 2. Pairing — DONE on this branch (committed May-2026 slice)
 - Pairing-code derivation: label `"sendspin-pairing-code-derive-v1"`; digits =

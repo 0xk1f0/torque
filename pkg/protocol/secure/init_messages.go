@@ -130,6 +130,54 @@ func Prologue(clientInitRaw, serverInitRaw []byte) []byte {
 	return bytes.Join([][]byte{clientInitRaw, serverInitRaw}, nil)
 }
 
+// server/error reason strings (spec: failure handling).
+const (
+	ServerErrorUnsupportedVersion = "unsupported_version"
+	ServerErrorUnsupportedSuite   = "unsupported_suite"
+	ServerErrorMalformed          = "malformed"
+)
+
+// EncodeServerError produces the server/error message for an init failure.
+// It is sent over the cleartext preamble in place of server/init, after which
+// the server closes.
+func EncodeServerError(reason string) ([]byte, error) {
+	return encodeEnvelope("server/error", map[string]string{"reason": reason})
+}
+
+// classifyInitFailure inspects raw client/init bytes and returns the spec's
+// server/error reason for a server-side init failure. Per spec: a version that
+// is an integer other than 1 is `unsupported_version` regardless of its other
+// payload fields; `suite` is checked after `version`; everything else is
+// `malformed`.
+func classifyInitFailure(raw []byte) string {
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return ServerErrorMalformed
+	}
+	if env.Type != "client/init" {
+		return ServerErrorMalformed
+	}
+	var probe struct {
+		Version any    `json:"version"`
+		Suite   string `json:"suite"`
+	}
+	if err := json.Unmarshal(env.Payload, &probe); err != nil {
+		return ServerErrorMalformed
+	}
+	switch v := probe.Version.(type) {
+	case float64:
+		if int(v) != CoreVersion {
+			return ServerErrorUnsupportedVersion
+		}
+	default:
+		return ServerErrorMalformed // version is not an integer
+	}
+	if probe.Suite != "" && !Suite(probe.Suite).Valid() {
+		return ServerErrorUnsupportedSuite
+	}
+	return ServerErrorMalformed
+}
+
 // EncodeNoiseHandshake wraps raw Noise handshake bytes in the
 // noise/handshake envelope (base64url data field).
 func EncodeNoiseHandshake(noiseMsg []byte) ([]byte, error) {

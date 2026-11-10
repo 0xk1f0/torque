@@ -41,10 +41,11 @@ type Conn struct {
 // server is the Noise initiator regardless of which side dialed.
 type ServerHandshakeConfig struct {
 	Identity *Identity
-	// SelectPSK returns the PSK to mix for this client — pairing-record
-	// lookup in a real server. Nil selects the Sentinel PSK for every
+	// SelectPSK returns the PSK to mix for this client and its category,
+	// which is announced in noise message 1 — pairing-record lookup in a
+	// real server. Nil selects the Sentinel PSK (category 'sn') for every
 	// client (unpaired-access only).
-	SelectPSK func(clientID string) (PSK, error)
+	SelectPSK func(clientID string) (PSK, PSKCategoryCode, error)
 	// HandshakeTimeout bounds each expected preamble message; 0 selects
 	// DefaultHandshakeTimeout.
 	HandshakeTimeout time.Duration
@@ -78,7 +79,14 @@ func ServerHandshake(ws *websocket.Conn, cfg ServerHandshakeConfig) (conn *Conn,
 	}
 	ci, err = ParseClientInit(clientInitRaw)
 	if err != nil {
-		return nil, ClientInit{}, err
+		// Init failure: send server/error with the classified reason, then
+		// close (per the spec's failure handling). Unauthenticated, so the
+		// reason is a hint. The deferred close runs on the way out.
+		reason := classifyInitFailure(clientInitRaw)
+		if serr, merr := EncodeServerError(reason); merr == nil {
+			_ = writeTextFrame(ws, serr, timeout)
+		}
+		return nil, ClientInit{}, fmt.Errorf("client/init rejected (%s): %w", reason, err)
 	}
 	clientPub, err := ParseID(ci.ClientID)
 	if err != nil {
@@ -94,10 +102,14 @@ func ServerHandshake(ws *websocket.Conn, cfg ServerHandshakeConfig) (conn *Conn,
 	}
 
 	psk := SentinelPSK()
+	category := CategorySentinel
 	if cfg.SelectPSK != nil {
-		psk, err = cfg.SelectPSK(ci.ClientID)
+		psk, category, err = cfg.SelectPSK(ci.ClientID)
 		if err != nil {
 			return nil, ClientInit{}, fmt.Errorf("select psk: %w", err)
+		}
+		if !category.Valid() {
+			return nil, ClientInit{}, fmt.Errorf("select psk: invalid category %q", string(category))
 		}
 	}
 
@@ -111,7 +123,7 @@ func ServerHandshake(ws *websocket.Conn, cfg ServerHandshakeConfig) (conn *Conn,
 	if err != nil {
 		return nil, ClientInit{}, err
 	}
-	msg1, err := init.Message1(psk.ID())
+	msg1, err := init.Message1(psk.ID(), category)
 	if err != nil {
 		return nil, ClientInit{}, err
 	}
@@ -149,9 +161,13 @@ type ClientHandshakeConfig struct {
 	ExpectedServerID string
 	// Suite is the cipher suite to announce; empty selects SuiteChaChaPoly.
 	Suite Suite
-	// SelectPSK maps the psk_id from Noise message 1 to a candidate PSK.
-	// Nil accepts only the Sentinel PSK.
-	SelectPSK func(pskID string) (PSK, bool)
+	// SelectPSK maps the psk_id + psk_category from Noise message 1 to a
+	// candidate PSK (a psk_id held under a different category is a miss).
+	// Nil accepts only the Sentinel PSK when the announced category is 'sn'.
+	SelectPSK func(pskID string, category PSKCategoryCode) (PSK, bool)
+	// SentinelFallback enables the initial-handshake Sentinel fallback on a
+	// lookup miss (default true; re-handshakes pass false).
+	SentinelFallback *bool
 	// HandshakeTimeout bounds each expected preamble message; 0 selects
 	// DefaultHandshakeTimeout.
 	HandshakeTimeout time.Duration
@@ -179,13 +195,20 @@ func ClientHandshake(ws *websocket.Conn, cfg ClientHandshakeConfig) (conn *Conn,
 	}
 	selectPSK := cfg.SelectPSK
 	if selectPSK == nil {
-		selectPSK = func(pskID string) (PSK, bool) {
+		selectPSK = func(pskID string, category PSKCategoryCode) (PSK, bool) {
+			if category != CategorySentinel {
+				return PSK{}, false
+			}
 			s := SentinelPSK()
 			if pskID == s.ID() {
 				return s, true
 			}
 			return PSK{}, false
 		}
+	}
+	fallback := true
+	if cfg.SentinelFallback != nil {
+		fallback = *cfg.SentinelFallback
 	}
 	timeout := cfg.HandshakeTimeout
 	if timeout == 0 {
@@ -227,11 +250,12 @@ func ClientHandshake(ws *websocket.Conn, cfg ClientHandshakeConfig) (conn *Conn,
 	}
 
 	resp, err := NewResponder(ResponderConfig{
-		Identity:      cfg.Identity,
-		PeerPublicKey: serverPub,
-		Suite:         suite,
-		Prologue:      Prologue(clientInitRaw, serverInitRaw),
-		SelectPSK:     selectPSK,
+		Identity:         cfg.Identity,
+		PeerPublicKey:    serverPub,
+		Suite:            suite,
+		Prologue:         Prologue(clientInitRaw, serverInitRaw),
+		SelectPSK:        selectPSK,
+		SentinelFallback: fallback,
 	})
 	if err != nil {
 		return nil, ServerInit{}, err

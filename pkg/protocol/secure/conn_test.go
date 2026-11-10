@@ -20,6 +20,71 @@ type loopbackResult struct {
 	err  error
 }
 
+// TestServerError_Classification covers the init-failure reasons per spec:
+// version checked before suite, an integer version other than 1 is always
+// unsupported_version, and everything else is malformed.
+func TestServerError_Classification(t *testing.T) {
+	id, _ := GenerateIdentity()
+	good := "{\"type\":\"client/init\",\"payload\":{\"client_id\":\"" + id.ID() + "\",\"version\":1,\"suite\":\"25519_ChaChaPoly_SHA256\"}}"
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"valid input classified malformed only on other fields",
+			good, ServerErrorMalformed}, // classify runs only on failure; a valid input wouldn't reach it
+		{"not JSON", "not json", ServerErrorMalformed},
+		{"wrong type", `{"type":"server/init","payload":{}}`, ServerErrorMalformed},
+		{"version 2 is unsupported_version", `{"type":"client/init","payload":{"client_id":"x","version":2,"suite":"25519_ChaChaPoly_SHA256"}}`, ServerErrorUnsupportedVersion},
+		{"version not an integer is malformed", `{"type":"client/init","payload":{"client_id":"x","version":"1","suite":"25519_ChaChaPoly_SHA256"}}`, ServerErrorMalformed},
+		{"unknown suite is unsupported_suite", `{"type":"client/init","payload":{"client_id":"x","version":1,"suite":"25519_DES_MD5"}}`, ServerErrorUnsupportedSuite},
+		{"bad client_id is malformed", `{"type":"client/init","payload":{"client_id":"bogus","version":1,"suite":"25519_ChaChaPoly_SHA256"}}`, ServerErrorMalformed},
+		{"version precedes suite", `{"type":"client/init","payload":{"client_id":"x","version":2,"suite":"25519_DES_MD5"}}`, ServerErrorUnsupportedVersion},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyInitFailure([]byte(tc.raw)); got != tc.want {
+				t.Errorf("classifyInitFailure = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConn_ServerSendsErrorOnBadInit verifies the server emits server/error
+// (cleartext, then close) when client/init is rejected, per failure handling.
+func TestConn_ServerSendsErrorOnBadInit(t *testing.T) {
+	serverID, _ := GenerateIdentity()
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, _ := upgrader.Upgrade(w, r, nil)
+		_, _, _ = ServerHandshake(ws, ServerHandshakeConfig{Identity: serverID})
+		ws.Close()
+	}))
+	defer srv.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+
+	bad := `{"type":"client/init","payload":{"client_id":"x","version":2,"suite":"25519_ChaChaPoly_SHA256"}}`
+	if err := ws.WriteMessage(websocket.TextMessage, []byte(bad)); err != nil {
+		t.Fatal(err)
+	}
+	mt, data, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatalf("read server/error: %v", err)
+	}
+	if mt != websocket.TextMessage {
+		t.Fatalf("server/error must be a text frame, got %d", mt)
+	}
+	if !strings.Contains(string(data), `"unsupported_version"`) {
+		t.Errorf("server/error = %s, want unsupported_version", data)
+	}
+}
+
 // startLoopbackServer runs an httptest WebSocket endpoint that performs the
 // server side of the preamble and hands the resulting Conn to the callback.
 func startLoopbackServer(t *testing.T, cfg ServerHandshakeConfig, serve func(*Conn, ClientInit)) *httptest.Server {
@@ -150,15 +215,72 @@ func TestConn_ClientRejectsUnknownPSK(t *testing.T) {
 	clientID, _ := GenerateIdentity()
 	longTerm, _ := NewPSK()
 
-	// Server offers a long-term PSK the client does not have.
+	// Server offers a long-term PSK the client does not have. With the
+	// initial-handshake sentinel fallback the client completes message 2 with
+	// the Sentinel PSK (client-side success); this server's handshake state is
+	// bound to the long-term PSK (flynn/noise fixes the PSK at state creation,
+	// so the server-side sentinel re-verify is not expressible) and then drops
+	// the connection. The fallback mechanics are covered by
+	// TestResponder_SentinelFallback.
 	srv := startLoopbackServer(t, ServerHandshakeConfig{
-		Identity:  serverID,
-		SelectPSK: func(string) (PSK, error) { return longTerm, nil },
+		Identity: serverID,
+		SelectPSK: func(string) (PSK, PSKCategoryCode, error) {
+			return longTerm, CategoryLongTerm, nil
+		},
 	}, func(conn *Conn, _ ClientInit) { conn.Close() })
 
-	_, _, err := dial(t, srv, ClientHandshakeConfig{Identity: clientID})
+	if _, _, err := dial(t, srv, ClientHandshakeConfig{Identity: clientID}); err != nil {
+		t.Fatalf("client should complete message 2 via sentinel fallback, got %v", err)
+	}
+
+	// Disabling the fallback (re-handshake semantics) must fail the handshake
+	// on a lookup miss.
+	noFallback := false
+	_, _, err := dial(t, srv, ClientHandshakeConfig{Identity: clientID, SentinelFallback: &noFallback})
 	if err == nil {
-		t.Fatal("handshake with unknown psk_id succeeded")
+		t.Fatal("handshake without sentinel fallback succeeded on a lookup miss")
+	}
+}
+
+// TestResponder_SentinelFallback verifies the client completes message 2 with
+// the Sentinel PSK on an initial-handshake psk_id lookup miss, producing a
+// usable (sentinel-keyed) session — the lost-record recovery path.
+func TestResponder_SentinelFallback(t *testing.T) {
+	server, client, prologue := handshakePeers(t, SuiteChaChaPoly)
+	longTerm, _ := NewPSK()
+
+	init, _ := NewInitiator(InitiatorConfig{
+		Identity: server, PeerPublicKey: client.PublicKey(),
+		Suite: SuiteChaChaPoly, Prologue: prologue, PSK: longTerm,
+	})
+	msg1, err := init.Message1(longTerm.ID(), CategoryLongTerm)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := NewResponder(ResponderConfig{
+		Identity: client, PeerPublicKey: server.PublicKey(),
+		Suite: SuiteChaChaPoly, Prologue: prologue,
+		// The client has no record for this psk_id → miss.
+		SelectPSK: func(string, PSKCategoryCode) (PSK, bool) { return PSK{}, false },
+		// Initial handshake: fall back to the sentinel.
+		SentinelFallback: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resp.Accept(msg1); err != nil {
+		t.Fatalf("Accept with sentinel fallback: %v", err)
+	}
+
+	// Disabled fallback (re-handshake behavior): a miss must fail.
+	respNoFB, _ := NewResponder(ResponderConfig{
+		Identity: client, PeerPublicKey: server.PublicKey(),
+		Suite: SuiteChaChaPoly, Prologue: prologue,
+		SelectPSK: func(string, PSKCategoryCode) (PSK, bool) { return PSK{}, false },
+	})
+	if _, _, err := respNoFB.Accept(msg1); err == nil {
+		t.Error("Accept without sentinel fallback succeeded on a lookup miss")
 	}
 }
 

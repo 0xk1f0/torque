@@ -30,8 +30,17 @@ func handshakePeers(t *testing.T, suite Suite) (server, client *Identity, prolog
 	return server, client, Prologue(ciRaw, siRaw)
 }
 
+// categoryFor derives the wire category of a test PSK: the Sentinel for the
+// sentinel constant, long-term otherwise.
+func categoryFor(psk PSK) PSKCategoryCode {
+	if psk == SentinelPSK() {
+		return CategorySentinel
+	}
+	return CategoryLongTerm
+}
+
 // runHandshake drives a complete handshake and returns both sessions.
-func runHandshake(t *testing.T, suite Suite, psk PSK, selectPSK func(string) (PSK, bool)) (serverSess, clientSess *Session) {
+func runHandshake(t *testing.T, suite Suite, psk PSK, selectPSK func(string, PSKCategoryCode) (PSK, bool)) (serverSess, clientSess *Session) {
 	t.Helper()
 	server, client, prologue := handshakePeers(t, suite)
 
@@ -50,7 +59,7 @@ func runHandshake(t *testing.T, suite Suite, psk PSK, selectPSK func(string) (PS
 		t.Fatalf("NewResponder: %v", err)
 	}
 
-	msg1, err := init.Message1(psk.ID())
+	msg1, err := init.Message1(psk.ID(), categoryFor(psk))
 	if err != nil {
 		t.Fatalf("Message1: %v", err)
 	}
@@ -65,7 +74,7 @@ func runHandshake(t *testing.T, suite Suite, psk PSK, selectPSK func(string) (PS
 	return serverSess, clientSess
 }
 
-func sentinelSelector(id string) (PSK, bool) {
+func sentinelSelector(id string, _ PSKCategoryCode) (PSK, bool) {
 	s := SentinelPSK()
 	if id == s.ID() {
 		return s, true
@@ -129,7 +138,7 @@ func TestHandshake_SelectsLongTermPSKByID(t *testing.T) {
 		longTerm.ID():      longTerm,
 	}
 	var selectedID string
-	serverSess, clientSess := runHandshake(t, SuiteChaChaPoly, longTerm, func(id string) (PSK, bool) {
+	serverSess, clientSess := runHandshake(t, SuiteChaChaPoly, longTerm, func(id string, _ PSKCategoryCode) (PSK, bool) {
 		selectedID = id
 		p, ok := candidates[id]
 		return p, ok
@@ -156,7 +165,7 @@ func TestHandshake_UnknownPSKIDFails(t *testing.T) {
 		Suite: SuiteChaChaPoly, Prologue: prologue, SelectPSK: sentinelSelector,
 	})
 
-	msg1, err := init.Message1(unknown.ID())
+	msg1, err := init.Message1(unknown.ID(), CategoryLongTerm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,10 +187,10 @@ func TestHandshake_WrongPSKValueFailsAtInitiator(t *testing.T) {
 	resp, _ := NewResponder(ResponderConfig{
 		Identity: client, PeerPublicKey: server.PublicKey(),
 		Suite: SuiteChaChaPoly, Prologue: prologue,
-		SelectPSK: func(string) (PSK, bool) { return corrupt, true },
+		SelectPSK: func(_ string, _ PSKCategoryCode) (PSK, bool) { return corrupt, true },
 	})
 
-	msg1, err := init.Message1(real.ID())
+	msg1, err := init.Message1(real.ID(), CategoryLongTerm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +216,7 @@ func TestHandshake_PrologueMismatchFails(t *testing.T) {
 		Suite: SuiteChaChaPoly, Prologue: tampered, SelectPSK: sentinelSelector,
 	})
 
-	msg1, err := init.Message1(SentinelPSK().ID())
+	msg1, err := init.Message1(SentinelPSK().ID(), CategorySentinel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +239,7 @@ func TestHandshake_WrongPeerStaticFails(t *testing.T) {
 		Suite: SuiteChaChaPoly, Prologue: prologue, SelectPSK: sentinelSelector,
 	})
 
-	msg1, err := init.Message1(SentinelPSK().ID())
+	msg1, err := init.Message1(SentinelPSK().ID(), CategorySentinel)
 	if err != nil {
 		t.Fatal(err)
 	}

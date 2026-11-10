@@ -162,8 +162,10 @@ func TestInterop_PairingPSKAgainstDotnetHost(t *testing.T) {
 		t.Fatalf("dial dotnet host: %v", err)
 	}
 	conn, ci, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{
-		Identity:  serverIdentity,
-		SelectPSK: func(string) (secure.PSK, error) { return pairingPSK, nil },
+		Identity: serverIdentity,
+		SelectPSK: func(string) (secure.PSK, secure.PSKCategoryCode, error) {
+			return pairingPSK, secure.CategoryPairing, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("server handshake on pairing psk: %v", err)

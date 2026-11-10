@@ -198,11 +198,7 @@ func (s *ServerSession) CompletePairingPSK(persist func(clientID string, psk sec
 		if err := writeMessage(s.Conn, ServerPairFinalize{}); err != nil {
 			return nil, fmt.Errorf("send server/pair-finalize: %w", err)
 		}
-		if err := s.Conn.RehandshakeInitiate(psk); err != nil {
-			return nil, fmt.Errorf("re-handshake to paired psk: %w", err)
-		}
-		resulting.PSKCategory = PSKLongTerm
-		return EstablishServer(s.Conn, resulting)
+		return s.Promote(psk, resulting)
 	case *PairAbort:
 		return nil, &PairAbortError{Reason: m.Reason}
 	default:
@@ -247,7 +243,8 @@ func (s *ClientSession) CompletePairingPSKClient(newPSK secure.PSK, persist func
 	}
 
 	// The server now initiates the in-band re-handshake; its first frame is
-	// a noise/handshake envelope.
+	// a noise/handshake envelope, followed by a server/activate (no
+	// client/hello is re-sent, per the spec's re-handshake rules).
 	msgType, payload, err := s.Conn.ReadMessage()
 	if err != nil {
 		return nil, fmt.Errorf("read rehandshake message 1: %w", err)
@@ -255,17 +252,10 @@ func (s *ClientSession) CompletePairingPSKClient(newPSK secure.PSK, persist func
 	if msgType != secure.MsgTypeJSON || !isNoiseHandshake(payload) {
 		return nil, fmt.Errorf("expected noise/handshake after pairing, got type %d", msgType)
 	}
-	err = s.Conn.RehandshakeRespond(payload, func(pskID string) (secure.PSK, bool) {
-		if pskID == newPSK.ID() {
-			return newPSK, true
-		}
-		return secure.PSK{}, false
-	})
-	if err != nil {
-		return nil, fmt.Errorf("re-handshake to paired psk: %w", err)
+	if err := s.CompletePromotion(payload, newPSK, resultingHello); err != nil {
+		return nil, err
 	}
-
-	return EstablishClient(s.Conn, ClientConfig{Hello: resultingHello, PSKCategory: PSKLongTerm})
+	return s, nil
 }
 
 func isNoiseHandshake(raw []byte) bool {

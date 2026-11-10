@@ -27,6 +27,25 @@ const (
 // is handled.
 type PSK [KeySize]byte
 
+// PSKCategoryCode is a psk_category value carried in the Noise message-1
+// payload, so the client can select a PSK by category (a psk_id held under a
+// different category is a lookup miss).
+type PSKCategoryCode string
+
+const (
+	// CategoryLongTerm is a long-term PSK from a pairing record.
+	CategoryLongTerm PSKCategoryCode = "lt"
+	// CategoryPairing is a staged Pairing PSK.
+	CategoryPairing PSKCategoryCode = "pr"
+	// CategorySentinel is the published Sentinel PSK.
+	CategorySentinel PSKCategoryCode = "sn"
+)
+
+// Valid reports whether c is a spec-defined category code.
+func (c PSKCategoryCode) Valid() bool {
+	return c == CategoryLongTerm || c == CategoryPairing || c == CategorySentinel
+}
+
 // NewPSK draws a fresh PSK from crypto/rand, for pairing flows that mint
 // long-term keys.
 func NewPSK() (PSK, error) {

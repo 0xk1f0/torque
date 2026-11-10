@@ -222,11 +222,7 @@ func (s *ServerSession) CompletePINPairing(cfg PINPairingServerConfig) (*ServerS
 	if err := writeMessage(s.Conn, ServerPairFinalize{}); err != nil {
 		return nil, fmt.Errorf("send server/pair-finalize: %w", err)
 	}
-	if err := s.Conn.RehandshakeInitiate(psk); err != nil {
-		return nil, fmt.Errorf("re-handshake to paired psk: %w", err)
-	}
-	cfg.Resulting.PSKCategory = PSKLongTerm
-	return EstablishServer(s.Conn, cfg.Resulting)
+	return s.Promote(psk, cfg.Resulting)
 }
 
 func mustISK(cp *secure.CPace) []byte {
@@ -430,15 +426,10 @@ func (s *ClientSession) RunPINPairing(cfg PINPairingClientConfig) (*ClientSessio
 	if mt != secure.MsgTypeJSON || !isNoiseHandshake(payload) {
 		return nil, fmt.Errorf("expected noise/handshake after pairing, got type %d", mt)
 	}
-	if err := s.Conn.RehandshakeRespond(payload, func(pskID string) (secure.PSK, bool) {
-		if pskID == newPSK.ID() {
-			return newPSK, true
-		}
-		return secure.PSK{}, false
-	}); err != nil {
-		return nil, fmt.Errorf("re-handshake to paired psk: %w", err)
+	if err := s.CompletePromotion(payload, newPSK, cfg.ResultingHello); err != nil {
+		return nil, err
 	}
-	return EstablishClient(s.Conn, ClientConfig{Hello: cfg.ResultingHello, PSKCategory: PSKLongTerm})
+	return s, nil
 }
 
 // codePRS converts the operator-facing code into the CPace PRS byte string:

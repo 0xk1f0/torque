@@ -65,10 +65,11 @@ type V2Config struct {
 
 	// UnpairedAccess advertises whether the client admits unpaired servers.
 	UnpairedAccess bool
-	// ResolvePSK looks up a pairing record: given the server's psk_id from
-	// noise message 1, return the matching PSK. Nil accepts only the
-	// Sentinel PSK (unpaired clients).
-	ResolvePSK func(pskID string) (secure.PSK, bool)
+	// ResolvePSK looks up a pairing record: given the server's psk_id and
+	// psk_category from noise message 1, return the matching PSK (a psk_id
+	// held under a different category is a miss, and the client falls back to
+	// the Sentinel). Nil accepts only the Sentinel PSK (unpaired clients).
+	ResolvePSK func(pskID string, category secure.PSKCategoryCode) (secure.PSK, bool)
 	// PSKCategory classifies the PSK that matched the handshake and drives
 	// the server/activate admissibility the client will accept. Defaults to
 	// Sentinel (or long-term if ResolvePSK matched a record).

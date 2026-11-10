@@ -20,9 +20,12 @@ const aeadTagSize = 16
 // message can carry (the framing layer's type byte counts against this).
 const MaxTransportPlaintext = maxNoiseMessage - aeadTagSize
 
-// msg1Payload is the JSON carried encrypted inside Noise message 1.
+// msg1Payload is the JSON carried encrypted inside Noise message 1. It names
+// the PSK (psk_id) and its category (psk_category) so the responder can select
+// the right key before processing message 2.
 type msg1Payload struct {
-	PSKID string `json:"psk_id"`
+	PSKID       string          `json:"psk_id"`
+	PSKCategory PSKCategoryCode `json:"psk_category"`
 }
 
 // InitiatorConfig configures the server side of the handshake. The server is
@@ -50,9 +53,13 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 }
 
 // Message1 produces Noise message 1, whose encrypted payload carries the
-// psk_id so the responder can select the PSK before processing message 2.
-func (i *Initiator) Message1(pskID string) ([]byte, error) {
-	payload, err := json.Marshal(msg1Payload{PSKID: pskID})
+// psk_id and psk_category so the responder can select the PSK before
+// processing message 2.
+func (i *Initiator) Message1(pskID string, category PSKCategoryCode) ([]byte, error) {
+	if !category.Valid() {
+		return nil, fmt.Errorf("invalid psk_category %q", string(category))
+	}
+	payload, err := json.Marshal(msg1Payload{PSKID: pskID, PSKCategory: category})
 	if err != nil {
 		return nil, fmt.Errorf("marshal message 1 payload: %w", err)
 	}
@@ -82,10 +89,16 @@ type ResponderConfig struct {
 	PeerPublicKey []byte // server's static public key, from server/init's server_id
 	Suite         Suite
 	Prologue      []byte
-	// SelectPSK maps the psk_id from message 1 to a candidate PSK. Returning
-	// false fails the handshake (spec: "If no candidate matches, the
-	// handshake fails").
-	SelectPSK func(pskID string) (PSK, bool)
+	// SelectPSK maps the psk_id + psk_category from message 1 to a candidate
+	// PSK. A psk_id held only under a different category is a lookup miss
+	// (return false). If a miss occurs and SentinelFallback is true (the
+	// initial handshake), message 2 is completed with the Sentinel PSK
+	// instead of failing (spec: Sentinel fallback).
+	SelectPSK func(pskID string, category PSKCategoryCode) (PSK, bool)
+	// SentinelFallback enables the initial-handshake Sentinel fallback on a
+	// psk_id lookup miss. Must be false for in-band re-handshakes, where a
+	// miss fails the handshake.
+	SentinelFallback bool
 }
 
 // Responder handles Noise message 1 and produces message 2 on the client side.
@@ -121,10 +134,20 @@ func (r *Responder) Accept(message1 []byte) (message2 []byte, sess *Session, err
 	if err := json.Unmarshal(payload, &m1); err != nil {
 		return nil, nil, fmt.Errorf("malformed message 1 payload: %w", err)
 	}
+	if !m1.PSKCategory.Valid() {
+		return nil, nil, fmt.Errorf("malformed message 1 payload: invalid psk_category %q", string(m1.PSKCategory))
+	}
 
-	psk, ok := r.cfg.SelectPSK(m1.PSKID)
+	psk, ok := r.cfg.SelectPSK(m1.PSKID, m1.PSKCategory)
 	if !ok {
-		return nil, nil, fmt.Errorf("no candidate PSK matches psk_id %q", m1.PSKID)
+		// Sentinelfall back on an initial-handshake lookup miss (the client
+		// lost its pairing record, or the server referenced a PSK of a
+		// category we do not hold) — complete message 2 with the Sentinel.
+		if r.cfg.SentinelFallback {
+			psk = SentinelPSK()
+		} else {
+			return nil, nil, fmt.Errorf("no candidate PSK matches psk_id %q (category %q)", m1.PSKID, m1.PSKCategory)
+		}
 	}
 
 	hs, err := newHandshakeState(r.cfg.Suite, r.cfg.Identity, r.cfg.PeerPublicKey, r.cfg.Prologue, psk, false)

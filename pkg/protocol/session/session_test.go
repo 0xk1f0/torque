@@ -98,7 +98,7 @@ func TestParse_RegistryAndUnknown(t *testing.T) {
 
 // startSecureLoopback runs an httptest WebSocket endpoint performing the
 // server-side handshake with the given PSK selector, delivering Conns on ch.
-func startSecureLoopback(t *testing.T, serverID *secure.Identity, selectPSK func(string) (secure.PSK, error), ch chan<- *secure.Conn) *httptest.Server {
+func startSecureLoopback(t *testing.T, serverID *secure.Identity, selectPSK func(string) (secure.PSK, secure.PSKCategoryCode, error), ch chan<- *secure.Conn) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +118,7 @@ func startSecureLoopback(t *testing.T, serverID *secure.Identity, selectPSK func
 }
 
 // dialSecure dials the loopback server and completes the client handshake.
-func dialSecure(t *testing.T, srv *httptest.Server, clientID *secure.Identity, selectPSK func(string) (secure.PSK, bool)) *secure.Conn {
+func dialSecure(t *testing.T, srv *httptest.Server, clientID *secure.Identity, selectPSK func(string, secure.PSKCategoryCode) (secure.PSK, bool)) *secure.Conn {
 	t.Helper()
 	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {

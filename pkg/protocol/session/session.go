@@ -230,6 +230,95 @@ func EstablishClient(conn *secure.Conn, cfg ClientConfig) (*ClientSession, error
 	return &ClientSession{Conn: conn, ServerName: hello.Name, Activate: *act, ActiveRoles: roles}, nil
 }
 
+// Promote re-handshakes the server connection to psk (a freshly delivered
+// long-term PSK) and, as the FIRST message under the new keys, sends
+// server/activate — per the spec's re-handshake rules, server/hello must NOT
+// be re-sent. The activation is a subsequent one on this connection: the
+// client's hello persists. Updates the session in place (returns s).
+func (s *ServerSession) Promote(psk secure.PSK, cfg ServerConfig) (*ServerSession, error) {
+	if err := s.Conn.RehandshakeInitiate(psk, secure.CategoryLongTerm); err != nil {
+		return nil, fmt.Errorf("re-handshake to paired psk: %w", err)
+	}
+
+	choose := cfg.ChooseActiveRoles
+	if choose == nil {
+		choose = FirstVersionPerFamily
+	}
+	roles := choose(s.Hello)
+	if roles == nil {
+		roles = []string{}
+	}
+	unpaired := s.Hello.UnpairedAccess.Enabled
+	if !AllowedActivities(PSKLongTerm, cfg.InitialActivities, unpaired) {
+		return nil, fmt.Errorf("server bug: activities %v not admissible on long-term psk", cfg.InitialActivities)
+	}
+	if len(roles) > 0 && !PlaybackCapable(PSKLongTerm, cfg.InitialActivities, unpaired) {
+		roles = []string{}
+	}
+	if err := writeMessage(s.Conn, ServerActivate{Activities: cfg.InitialActivities, ActiveRoles: &roles}); err != nil {
+		return nil, fmt.Errorf("send server/activate after re-handshake: %w", err)
+	}
+	s.ActiveRoles = roles
+	s.Activities = cfg.InitialActivities
+	s.cfg = cfg
+	s.cfg.PSKCategory = PSKLongTerm
+	return s, nil
+}
+
+// CompletePromotion answers the server's post-pairing re-handshake and reads
+// the subsequent server/activate under the new keys — no client/hello is
+// re-sent, per the spec. hello is the client's persistent hello (its
+// unpaired_access governs admissibility). Updates the session in place.
+func (s *ClientSession) CompletePromotion(message1Envelope []byte, newPSK secure.PSK, hello ClientHello) error {
+	if err := s.Conn.RehandshakeRespond(message1Envelope, func(pskID string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
+		if pskID == newPSK.ID() {
+			return newPSK, true
+		}
+		return secure.PSK{}, false
+	}); err != nil {
+		return fmt.Errorf("re-handshake to paired psk: %w", err)
+	}
+
+	// The first message under the new keys must be server/activate.
+	msg, err := readControl(s.Conn)
+	if err != nil {
+		return fmt.Errorf("read server/activate after re-handshake: %w", err)
+	}
+	act, ok := msg.(*ServerActivate)
+	if !ok {
+		return fmt.Errorf("expected server/activate after re-handshake, got %T", msg)
+	}
+
+	methods := make([]string, 0, len(hello.SupportedPairMethods))
+	for m := range hello.SupportedPairMethods {
+		methods = append(methods, m)
+	}
+	verdict := JudgeActivate(PSKLongTerm, *act, ClientAdmissionState{
+		UnpairedAccessEnabled: hello.UnpairedAccess.Enabled,
+		OfferedPairMethods:    methods,
+	})
+	if !verdict.OK {
+		if verdict.Goodbye != "" {
+			_ = writeMessage(s.Conn, ClientGoodbye{Reason: verdict.Goodbye})
+		} else if verdict.PairAbort != "" {
+			_ = s.Conn.WriteJSON(map[string]any{
+				"type":    "pair/abort",
+				"payload": map[string]any{"reason": string(verdict.PairAbort)},
+			})
+		}
+		s.Conn.Close()
+		return &AdmissionError{Verdict: verdict}
+	}
+
+	roles := []string{}
+	if act.ActiveRoles != nil {
+		roles = *act.ActiveRoles
+	}
+	s.Activate = *act
+	s.ActiveRoles = roles
+	return nil
+}
+
 // SendGoodbye sends client/goodbye with the given reason.
 func (s *ClientSession) SendGoodbye(reason GoodbyeReason) error {
 	if !reason.Valid() {

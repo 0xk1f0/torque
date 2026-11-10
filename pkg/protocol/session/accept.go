@@ -10,6 +10,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// categoryCode maps the session PSK category to its wire code.
+func categoryCode(cat PSKCategory) secure.PSKCategoryCode {
+	switch cat {
+	case PSKLongTerm:
+		return secure.CategoryLongTerm
+	case PSKPairing:
+		return secure.CategoryPairing
+	default:
+		return secure.CategorySentinel
+	}
+}
+
 // PairingStore resolves the PSK to mix for a connecting client and its
 // category, per the spec's server-side order (long-term record → staged
 // Pairing PSK → Sentinel). MemoryPairingStore implements it.
@@ -58,17 +70,17 @@ func AcceptServer(ws *websocket.Conn, cfg ServerAcceptConfig) (*AcceptResult, er
 	}
 
 	// Capture the matched category from the PSK resolver: the handshake
-	// selects the PSK by client_id, and we need its category afterward to
-	// decide the activity set.
+	// selects the PSK by client_id (and announces its category in noise
+	// message 1); we need the category afterward to decide the activity set.
 	category := PSKSentinel
-	selectPSK := func(clientID string) (secure.PSK, error) {
+	selectPSK := func(clientID string) (secure.PSK, secure.PSKCategoryCode, error) {
 		if cfg.Store == nil {
 			category = PSKSentinel
-			return secure.SentinelPSK(), nil
+			return secure.SentinelPSK(), secure.CategorySentinel, nil
 		}
 		psk, cat := cfg.Store.Resolve(clientID)
 		category = cat
-		return psk, nil
+		return psk, categoryCode(cat), nil
 	}
 
 	conn, ci, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{
