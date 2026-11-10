@@ -23,14 +23,14 @@ const (
 //   - For a buffered source the lead may be extended toward
 //     required_lead_time_ms (it adds no latency when the server can read
 //     ahead); for a live source it is not (extending would add latency).
-//   - static_delay_ms is then added on top — the server applies it separately
+//   - output_delay_ms is then added on top — the server applies it separately
 //     rather than folding it into the reported timing fields.
 func PerPlayerSendAheadMs(t Timing, kind SourceKind) int {
 	base := t.MinBufferMs
 	if kind == SourceBuffered && t.RequiredLeadTimeMs > base {
 		base = t.RequiredLeadTimeMs
 	}
-	return base + t.StaticDelayMs
+	return base + t.OutputDelayMs
 }
 
 // GroupSendAheadMs is the common send-ahead for a group: the maximum

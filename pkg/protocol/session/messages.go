@@ -7,22 +7,10 @@ import (
 	"fmt"
 )
 
-// TrustLevel is the trust the client extends to the server on a connection.
-type TrustLevel string
-
-const (
-	// TrustUser means a pairing record exists for the server.
-	TrustUser TrustLevel = "user"
-	// TrustNone means no record exists: pairing handshakes and unpaired access.
-	TrustNone TrustLevel = "none"
-)
-
-// Valid reports whether t is a spec-defined trust level.
-func (t TrustLevel) Valid() bool { return t == TrustUser || t == TrustNone }
-
 // ServerHello is the first encrypted message, sent by the server.
 type ServerHello struct {
-	Name string `json:"name"`
+	Name      string   `json:"name"`
+	Languages []string `json:"languages,omitempty"` // optional BCP 47 tags, descending operator preference
 }
 
 // DeviceInfo describes the client device in client/hello.
@@ -41,11 +29,11 @@ type AudioFormat struct {
 	BitDepth   int    `json:"bit_depth"`
 }
 
-// PlayerSupport is the player@v1_support object.
+// PlayerSupport is the player@v1_support object. Note supported_commands does
+// NOT belong here — it lives in the client/state player object per spec.
 type PlayerSupport struct {
-	SupportedFormats  []AudioFormat `json:"supported_formats"`
-	BufferCapacity    int           `json:"buffer_capacity"`
-	SupportedCommands []string      `json:"supported_commands"`
+	SupportedFormats []AudioFormat `json:"supported_formats"`
+	BufferCapacity   int           `json:"buffer_capacity"`
 }
 
 // SourceSupport is the source@v1_support object.
@@ -87,13 +75,18 @@ type VisualizerSupport struct {
 	Spectrum       *SpectrumConfig `json:"spectrum,omitempty"`
 }
 
-// PairMethodDescriptor is one entry of supported_pair_methods.
+// PairMethodDescriptor is one entry of supported_pair_methods, keyed by method
+// identifier per the spec. dynamic_pairing_code carries out_channels and
+// formats; pairing_psk and static_pairing_code carry locations.
 type PairMethodDescriptor struct {
-	Method       string   `json:"method"`
-	OutChannels  []string `json:"out_channels,omitempty"`
-	MinPINLength int      `json:"min_pin_length,omitempty"`
-	LockedOut    *bool    `json:"locked_out,omitempty"`
+	OutChannels []string `json:"out_channels,omitempty"`
+	Formats     []string `json:"formats,omitempty"`
+	Locations   []string `json:"locations,omitempty"`
 }
+
+// SupportedPairMethods describes the pairing methods a client offers, keyed by
+// method identifier.
+type SupportedPairMethods map[string]PairMethodDescriptor
 
 // UnpairedAccess advertises whether the client admits unpaired servers.
 type UnpairedAccess struct {
@@ -102,39 +95,65 @@ type UnpairedAccess struct {
 
 // ClientHello is the client's encrypted capability announcement.
 type ClientHello struct {
-	Name                 string                 `json:"name"`
-	DeviceInfo           *DeviceInfo            `json:"device_info,omitempty"`
-	TrustLevel           TrustLevel             `json:"trust_level"`
-	SupportedRoles       []string               `json:"supported_roles"`
-	PlayerSupport        *PlayerSupport         `json:"player@v1_support,omitempty"`
-	SourceSupport        *SourceSupport         `json:"source@v1_support,omitempty"`
-	ArtworkSupport       *ArtworkSupport        `json:"artwork@v1_support,omitempty"`
-	VisualizerSupport    *VisualizerSupport     `json:"visualizer@v1_support,omitempty"`
-	SupportedPairMethods []PairMethodDescriptor `json:"supported_pair_methods,omitempty"`
-	UnpairedAccess       UnpairedAccess         `json:"unpaired_access"`
+	Name                 string               `json:"name"`
+	DeviceInfo           *DeviceInfo          `json:"device_info,omitempty"`
+	SupportedRoles       []string             `json:"supported_roles"`
+	PlayerSupport        *PlayerSupport       `json:"player@v1_support,omitempty"`
+	VisualizerSupport    *VisualizerSupport   `json:"visualizer@v1_support,omitempty"`
+	SupportedPairMethods SupportedPairMethods `json:"supported_pair_methods"`
+	UnpairedAccess       UnpairedAccess       `json:"unpaired_access"`
 }
 
 // Activity is one entry of server/activate's activities set.
 type Activity string
 
 const (
-	ActivityPlayback   Activity = "playback"
-	ActivityPairing    Activity = "pairing"
-	ActivityManagement Activity = "management"
+	ActivityPlayback Activity = "playback"
+	ActivityPairing  Activity = "pairing"
 )
 
 // Valid reports whether a is a spec-defined activity.
 func (a Activity) Valid() bool {
-	return a == ActivityPlayback || a == ActivityPairing || a == ActivityManagement
+	return a == ActivityPlayback || a == ActivityPairing
+}
+
+// PairingMethod is the pairing method a server/activate declares.
+type PairingMethod string
+
+const (
+	// PairMethodDynamicPairingCode is the dynamic pairing code method.
+	PairMethodDynamicPairingCode PairingMethod = "dynamic_pairing_code"
+	// PairMethodPairingPSK is the pairing PSK method.
+	PairMethodPairingPSK PairingMethod = "pairing_psk"
+	// PairMethodStaticPairingCode is the static pairing code method.
+	PairMethodStaticPairingCode PairingMethod = "static_pairing_code"
+)
+
+// PairingFormat is how a dynamic pairing code is emitted to the operator.
+type PairingFormat string
+
+const (
+	// PairingFormatDigits emits the code as decimal digits.
+	PairingFormatDigits PairingFormat = "digits"
+	// PairingFormatQR emits the code as a QR code.
+	PairingFormatQR PairingFormat = "qr_code"
+)
+
+// Pairing is the pairing object of server/activate: the method the server
+// picked plus, for dynamic pairing codes, the emission format. Required when
+// 'pairing' is in activities; absent otherwise.
+type Pairing struct {
+	Method PairingMethod  `json:"method"`
+	Format *PairingFormat `json:"format,omitempty"`
 }
 
 // ServerActivate declares the server's current purpose on the connection.
 // ActiveRoles uses a pointer to distinguish "omitted, persist previous"
 // (nil) from "explicitly empty" (&[]string{}).
 type ServerActivate struct {
-	Activities         []Activity `json:"activities"`
-	ActiveRoles        *[]string  `json:"active_roles,omitempty"`
-	SelectedPairMethod string     `json:"selected_pair_method,omitempty"`
+	Activities  []Activity `json:"activities"`
+	ActiveRoles *[]string  `json:"active_roles,omitempty"`
+	Pairing     *Pairing   `json:"pairing,omitempty"`
 }
 
 // ClientTime is the client's clock-sync probe.
@@ -213,6 +232,8 @@ func typeOf(v any) (string, error) {
 		return "group/update", nil
 	case StreamStart, *StreamStart:
 		return "stream/start", nil
+	case StreamClear, *StreamClear:
+		return "stream/clear", nil
 	case StreamEnd, *StreamEnd:
 		return "stream/end", nil
 	case ClientCommand, *ClientCommand:
@@ -282,6 +303,8 @@ func Parse(raw []byte) (any, error) {
 		v = &GroupUpdate{}
 	case "stream/start":
 		v = &StreamStart{}
+	case "stream/clear":
+		v = &StreamClear{}
 	case "stream/end":
 		v = &StreamEnd{}
 	case "client/command":

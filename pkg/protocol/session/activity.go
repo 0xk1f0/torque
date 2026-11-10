@@ -48,10 +48,12 @@ func ValidateActivities(activities []Activity) error {
 // AllowedActivities reports whether the activity set is one the matched PSK
 // category permits, per the spec's table:
 //
-//	Sendspin PSK (long-term): ['pairing'] or any subset of {'playback','management'}
-//	Pairing PSK:              ['pairing']
-//	Sentinel PSK:             [], ['pairing'], ['playback'] (the latter only
-//	                          when the client has unpaired access enabled)
+//	long-term PSK: [] or ['playback']
+//	pairing PSK:   [], ['pairing'], ['playback']¹, ['playback','pairing']¹
+//	Sentinel PSK:  [], ['pairing'], ['playback']¹, ['playback','pairing']¹
+//
+// ¹ only when the client has unpaired access enabled.
+// 'management' is not a spec activity and is rejected by ValidateActivities.
 func AllowedActivities(psk PSKCategory, activities []Activity, unpairedAccessEnabled bool) bool {
 	if ValidateActivities(activities) != nil {
 		return false
@@ -61,22 +63,21 @@ func AllowedActivities(psk PSKCategory, activities []Activity, unpairedAccessEna
 		has[a] = true
 	}
 	pairing := has[ActivityPairing]
+	playback := has[ActivityPlayback]
 
 	switch psk {
 	case PSKLongTerm:
-		if pairing {
-			return len(activities) == 1
-		}
-		return true // any subset of {playback, management}, including empty
-	case PSKPairing:
-		return pairing && len(activities) == 1
-	case PSKSentinel:
+		// [] or ['playback'] — never pairing.
+		return !pairing
+	case PSKPairing, PSKSentinel:
 		switch {
 		case len(activities) == 0:
 			return true
 		case len(activities) == 1 && pairing:
 			return true
-		case len(activities) == 1 && has[ActivityPlayback]:
+		case len(activities) == 1 && playback:
+			return unpairedAccessEnabled
+		case len(activities) == 2 && pairing && playback:
 			return unpairedAccessEnabled
 		default:
 			return false
@@ -176,26 +177,36 @@ func JudgeActivate(psk PSKCategory, act ServerActivate, state ClientAdmissionSta
 		}
 	}
 	if pairing {
-		m := act.SelectedPairMethod
-		if m == "" {
+		// pairing object is required whenever 'pairing' is in activities.
+		if act.Pairing == nil {
 			return Verdict{PairAbort: PairAbortMethodNotSupported}
 		}
-		// selected_pair_method must be 'pairing_psk' iff the PSK is the
+		m := act.Pairing.Method
+		// pairing.method must be 'pairing_psk' iff the matched PSK is the
 		// Pairing PSK.
-		if (m == "pairing_psk") != (psk == PSKPairing) {
+		if (m == PairMethodPairingPSK) != (psk == PSKPairing) {
 			return Verdict{PairAbort: PairAbortMethodNotSupported}
 		}
 		offered := false
 		for _, o := range state.OfferedPairMethods {
-			if o == m {
+			if o == string(m) {
 				offered = true
 			}
 		}
 		if !offered {
 			return Verdict{PairAbort: PairAbortMethodNotSupported}
 		}
-	} else if act.SelectedPairMethod != "" {
-		// selected_pair_method is "absent otherwise".
+		// A dynamic pairing code requires a format the client offered.
+		if m == PairMethodDynamicPairingCode {
+			if act.Pairing.Format == nil {
+				return Verdict{PairAbort: PairAbortMethodNotSupported}
+			}
+		} else if act.Pairing.Format != nil {
+			// format is "absent otherwise".
+			return Verdict{PairAbort: PairAbortMethodNotSupported}
+		}
+	} else if act.Pairing != nil {
+		// pairing is "absent otherwise".
 		return Verdict{Goodbye: GoodbyeUnauthorized}
 	}
 

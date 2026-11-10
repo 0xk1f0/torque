@@ -7,9 +7,11 @@ package playback
 // server run more than this far ahead.
 const DefaultMaxBufferedUS int64 = 30_000_000
 
-// queued records one sent-but-unplayed chunk: when its playback ends, how many
-// bytes it cost the member's buffer, and how long it plays.
+// queued records one sent-but-unplayed chunk: its playback start/end on the
+// server clock, how many bytes it cost the member's buffer, and how long it
+// plays.
 type queued struct {
+	startUS    int64
 	endUS      int64
 	bytes      int
 	durationUS int64
@@ -73,16 +75,62 @@ func (t *BufferTracker) CanQueue(bytes int, durationUS int64) bool {
 	return t.bufferedUS+durationUS <= t.maxUS
 }
 
-// Register records a chunk as queued. Call it after a successful send; endUS is
-// the chunk's playback-end time (its timestamp + duration).
-func (t *BufferTracker) Register(endUS int64, bytes int, durationUS int64) {
+// Register records a chunk as queued. Call it after a successful send; startUS
+// is the chunk's playback start (its timestamp) and endUS its completion time
+// (timestamp + duration − output_delay).
+func (t *BufferTracker) Register(startUS, endUS int64, bytes int, durationUS int64) {
 	if t.count == len(t.ring) {
 		t.grow()
 	}
-	t.ring[(t.head+t.count)%len(t.ring)] = queued{endUS: endUS, bytes: bytes, durationUS: durationUS}
+	t.ring[(t.head+t.count)%len(t.ring)] = queued{startUS: startUS, endUS: endUS, bytes: bytes, durationUS: durationUS}
 	t.count++
 	t.bufferedBytes += bytes
 	t.bufferedUS += durationUS
+}
+
+// Reset drops every queued chunk, returning the bytes freed. Called on a
+// full stream/clear (no from_timestamp) and on stream/end, which reset a
+// player's buffer accounting per the spec.
+func (t *BufferTracker) Reset() int {
+	freed := t.bufferedBytes
+	t.ring = make([]queued, 64)
+	t.head = 0
+	t.count = 0
+	t.bufferedBytes = 0
+	t.bufferedUS = 0
+	return freed
+}
+
+// DiscardSince drops every queued chunk whose playback starts at or after
+// fromUS, returning the bytes freed. Called on a stream/clear with
+// from_timestamp: audio before that time keeps playing, at-or-after is
+// discarded (the spec's partial clear).
+func (t *BufferTracker) DiscardSince(fromUS int64) int {
+	freed := 0
+	kept := make([]queued, 0, t.count)
+	for i := 0; i < t.count; i++ {
+		e := t.ring[(t.head+i)%len(t.ring)]
+		if e.startUS >= fromUS {
+			freed += e.bytes
+			t.bufferedBytes -= e.bytes
+			t.bufferedUS -= e.durationUS
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(kept) != t.count {
+		t.ring = make([]queued, 64)
+		t.head = 0
+		t.count = 0
+		for _, e := range kept {
+			if t.count == len(t.ring) {
+				t.grow()
+			}
+			t.ring[t.count] = e
+			t.count++
+		}
+	}
+	return freed
 }
 
 // BufferedBytes returns the bytes currently queued for the member.

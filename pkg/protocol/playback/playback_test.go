@@ -7,41 +7,41 @@ import "testing"
 func ptr(i int) *int { return &i }
 
 func TestTiming_MergeDelta(t *testing.T) {
-	base := Timing{StaticDelayMs: 100, RequiredLeadTimeMs: 300, MinBufferMs: 200, BufferCapacity: 1 << 20}
+	base := Timing{OutputDelayMs: 100, RequiredLeadTimeMs: 300, MinBufferMs: 200, BufferCapacity: 1 << 20}
 
 	// Absent fields retain their previous values.
 	got := base.MergeDelta(TimingDelta{MinBufferMs: ptr(250)})
-	if got.MinBufferMs != 250 || got.StaticDelayMs != 100 || got.RequiredLeadTimeMs != 300 || got.BufferCapacity != 1<<20 {
+	if got.MinBufferMs != 250 || got.OutputDelayMs != 100 || got.RequiredLeadTimeMs != 300 || got.BufferCapacity != 1<<20 {
 		t.Errorf("partial merge = %+v", got)
 	}
 
 	// static_delay_ms clamps rather than rejecting.
-	got = base.MergeDelta(TimingDelta{StaticDelayMs: ptr(9000)})
-	if got.StaticDelayMs != MaxStaticDelayMs {
-		t.Errorf("clamp high = %d, want %d", got.StaticDelayMs, MaxStaticDelayMs)
+	got = base.MergeDelta(TimingDelta{OutputDelayMs: ptr(9000)})
+	if got.OutputDelayMs != MaxOutputDelayMs {
+		t.Errorf("clamp high = %d, want %d", got.OutputDelayMs, MaxOutputDelayMs)
 	}
-	got = base.MergeDelta(TimingDelta{StaticDelayMs: ptr(-5)})
-	if got.StaticDelayMs != MinStaticDelayMs {
-		t.Errorf("clamp low = %d, want %d", got.StaticDelayMs, MinStaticDelayMs)
+	got = base.MergeDelta(TimingDelta{OutputDelayMs: ptr(-5)})
+	if got.OutputDelayMs != MinOutputDelayMs {
+		t.Errorf("clamp low = %d, want %d", got.OutputDelayMs, MinOutputDelayMs)
 	}
 
 	// A full delta replaces everything.
 	full := base.MergeDelta(TimingDelta{
-		StaticDelayMs: ptr(0), RequiredLeadTimeMs: ptr(500), MinBufferMs: ptr(400), BufferCapacity: ptr(2 << 20),
+		OutputDelayMs: ptr(0), RequiredLeadTimeMs: ptr(500), MinBufferMs: ptr(400), BufferCapacity: ptr(2 << 20),
 	})
-	if full != (Timing{StaticDelayMs: 0, RequiredLeadTimeMs: 500, MinBufferMs: 400, BufferCapacity: 2 << 20}) {
+	if full != (Timing{OutputDelayMs: 0, RequiredLeadTimeMs: 500, MinBufferMs: 400, BufferCapacity: 2 << 20}) {
 		t.Errorf("full merge = %+v", full)
 	}
 }
 
 func TestTiming_Validate(t *testing.T) {
-	ok := Timing{StaticDelayMs: 5000, RequiredLeadTimeMs: 0, MinBufferMs: 0, BufferCapacity: 0}
+	ok := Timing{OutputDelayMs: 5000, RequiredLeadTimeMs: 0, MinBufferMs: 0, BufferCapacity: 0}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("boundary-valid timing rejected: %v", err)
 	}
 	for _, bad := range []Timing{
-		{StaticDelayMs: 5001},
-		{StaticDelayMs: -1},
+		{OutputDelayMs: 5001},
+		{OutputDelayMs: -1},
 		{RequiredLeadTimeMs: -1},
 		{MinBufferMs: -1},
 		{BufferCapacity: -1},
@@ -60,13 +60,13 @@ func TestPerPlayerSendAhead(t *testing.T) {
 		want int
 	}{
 		// Live: baseline min_buffer_ms + static_delay_ms; required lead ignored.
-		{"live ignores lead", Timing{MinBufferMs: 200, RequiredLeadTimeMs: 800, StaticDelayMs: 50}, SourceLive, 250},
+		{"live ignores lead", Timing{MinBufferMs: 200, RequiredLeadTimeMs: 800, OutputDelayMs: 50}, SourceLive, 250},
 		// Buffered: extend toward required_lead_time_ms when larger.
-		{"buffered extends to lead", Timing{MinBufferMs: 200, RequiredLeadTimeMs: 800, StaticDelayMs: 50}, SourceBuffered, 850},
+		{"buffered extends to lead", Timing{MinBufferMs: 200, RequiredLeadTimeMs: 800, OutputDelayMs: 50}, SourceBuffered, 850},
 		// Buffered but min_buffer already exceeds lead: stays at min_buffer.
-		{"buffered keeps larger min_buffer", Timing{MinBufferMs: 900, RequiredLeadTimeMs: 400, StaticDelayMs: 0}, SourceBuffered, 900},
+		{"buffered keeps larger min_buffer", Timing{MinBufferMs: 900, RequiredLeadTimeMs: 400, OutputDelayMs: 0}, SourceBuffered, 900},
 		// Zero static delay.
-		{"no static delay", Timing{MinBufferMs: 300, RequiredLeadTimeMs: 300, StaticDelayMs: 0}, SourceLive, 300},
+		{"no static delay", Timing{MinBufferMs: 300, RequiredLeadTimeMs: 300, OutputDelayMs: 0}, SourceLive, 300},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,9 +79,9 @@ func TestPerPlayerSendAhead(t *testing.T) {
 
 func TestGroupSendAhead_MaxAcrossMembers(t *testing.T) {
 	players := []Timing{
-		{MinBufferMs: 200, StaticDelayMs: 0},   // 200
-		{MinBufferMs: 150, StaticDelayMs: 300}, // 450  ← max
-		{MinBufferMs: 400, StaticDelayMs: 0},   // 400
+		{MinBufferMs: 200, OutputDelayMs: 0},   // 200
+		{MinBufferMs: 150, OutputDelayMs: 300}, // 450  ← max
+		{MinBufferMs: 400, OutputDelayMs: 0},   // 400
 	}
 	if got := GroupSendAheadMs(players, SourceLive); got != 450 {
 		t.Errorf("group send-ahead = %d, want 450 (max member)", got)
@@ -91,7 +91,7 @@ func TestGroupSendAhead_MaxAcrossMembers(t *testing.T) {
 	}
 
 	// A high static_delay player raises the common send-ahead so its lead is met.
-	players = append(players, Timing{MinBufferMs: 100, StaticDelayMs: 5000}) // 5100
+	players = append(players, Timing{MinBufferMs: 100, OutputDelayMs: 5000}) // 5100
 	if got := GroupSendAheadMs(players, SourceLive); got != 5100 {
 		t.Errorf("group send-ahead with high-delay member = %d, want 5100", got)
 	}

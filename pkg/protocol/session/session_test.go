@@ -16,14 +16,13 @@ import (
 func TestMarshal_WireShapes(t *testing.T) {
 	raw, err := Marshal(ClientHello{
 		Name:           "shape-test",
-		TrustLevel:     TrustNone,
 		SupportedRoles: []string{"player@v1"},
 		PlayerSupport: &PlayerSupport{
-			SupportedFormats:  []AudioFormat{{Codec: "opus", Channels: 2, SampleRate: 48000, BitDepth: 16}},
-			BufferCapacity:    1 << 20,
-			SupportedCommands: []string{"volume", "mute"},
+			SupportedFormats: []AudioFormat{{Codec: "opus", Channels: 2, SampleRate: 48000, BitDepth: 16}},
+			BufferCapacity:   1 << 20,
 		},
-		UnpairedAccess: UnpairedAccess{Enabled: true},
+		UnpairedAccess:       UnpairedAccess{Enabled: true},
+		SupportedPairMethods: SupportedPairMethods{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -31,8 +30,8 @@ func TestMarshal_WireShapes(t *testing.T) {
 	s := string(raw)
 	for _, want := range []string{
 		`"type":"client/hello"`,
-		`"trust_level":"none"`,
 		`"player@v1_support"`,
+		`"supported_pair_methods":{}`,
 		`"unpaired_access":{"enabled":true}`,
 		`"buffer_capacity":1048576`,
 	} {
@@ -40,8 +39,9 @@ func TestMarshal_WireShapes(t *testing.T) {
 			t.Errorf("client/hello wire form missing %s: %s", want, s)
 		}
 	}
-	// Hard cutover: legacy field names must never appear.
-	for _, banned := range []string{"player_support", "connection_reason", "client_id"} {
+	// Hard cutover: legacy field names must never appear, and trust_level was
+	// removed from the current spec entirely.
+	for _, banned := range []string{"player_support", "connection_reason", "client_id", "trust_level"} {
 		if strings.Contains(s, `"`+banned+`"`) {
 			t.Errorf("client/hello contains legacy field %q", banned)
 		}
@@ -145,7 +145,6 @@ func loopback(t *testing.T) (serverConn, clientConn *secure.Conn) {
 func testHello(unpaired bool) ClientHello {
 	return ClientHello{
 		Name:           "loop-client",
-		TrustLevel:     TrustNone,
 		SupportedRoles: []string{"player@v2", "player@v1", "metadata@v1"},
 		UnpairedAccess: UnpairedAccess{Enabled: unpaired},
 	}
@@ -276,7 +275,7 @@ func TestEstablishServer_RefusesInadmissibleConfig(t *testing.T) {
 	_, err := EstablishServer(serverConn, ServerConfig{
 		ServerName:        "guard",
 		PSKCategory:       PSKSentinel,
-		InitialActivities: []Activity{ActivityManagement}, // never valid on sentinel
+		InitialActivities: []Activity{ActivityPlayback}, // never valid on sentinel without unpaired access
 	})
 	if err == nil || !strings.Contains(err.Error(), "server bug") {
 		t.Fatalf("EstablishServer = %v, want server-bug guard", err)

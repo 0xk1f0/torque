@@ -125,6 +125,23 @@ func (g *Group) SetCodecByteRate(id string, byteRate int) {
 	}
 }
 
+// ClearBuffers resets a member's buffer accounting. A full clear (fromTimestamp
+// nil) drops everything — used on stream/end and on seeks/track jumps after a
+// stream/clear without from_timestamp. A partial clear keeps only audio that
+// starts before fromTimestamp, matching the spec's stream/clear from_timestamp
+// semantics. It is a no-op for an unknown member.
+func (g *Group) ClearBuffers(id string, fromTimestamp *int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if m, ok := g.members[id]; ok {
+		if fromTimestamp == nil {
+			m.tracker.Reset()
+		} else {
+			m.tracker.DiscardSince(*fromTimestamp)
+		}
+	}
+}
+
 // Len returns the number of members (available or not).
 func (g *Group) Len() int {
 	g.mu.Lock()
@@ -185,22 +202,28 @@ func (g *Group) Broadcast(nowUS, timestampUS, durationUS int64, payloadFor func(
 	g.mu.Unlock()
 
 	var results []BroadcastResult
-	endUS := timestampUS + durationUS
 	for _, m := range snapshot {
 		audio := payloadFor(m)
 		if audio == nil {
 			continue
 		}
+		// Per the spec's player buffer accounting, count each chunk's full
+		// 13-byte header plus its encoded payload, and compute its completion
+		// time as timestamp + duration minus the player's output_delay_ms
+		// (the audio leaves the device's port at the timestamp minus the
+		// output delay).
+		chunkBytes := len(audio) + AudioChunkMessageHeaderSize
+		endUS := timestampUS + durationUS - int64(m.timing.OutputDelayMs)*1000
 		m.tracker.Prune(nowUS)
-		if !m.tracker.CanQueue(len(audio), durationUS) {
+		if !m.tracker.CanQueue(chunkBytes, durationUS) {
 			results = append(results, BroadcastResult{MemberID: m.ID, Backpressure: true})
 			continue
 		}
-		if err := m.conn.WriteMessage(PlayerAudioMsgType, EncodeAudioChunk(timestampUS, audio)); err != nil {
+		if err := m.conn.WriteMessage(PlayerAudioMsgType, EncodeAudioChunk(timestampUS, nowUS, audio)); err != nil {
 			results = append(results, BroadcastResult{MemberID: m.ID, Err: err})
 			continue
 		}
-		m.tracker.Register(endUS, len(audio), durationUS)
+		m.tracker.Register(timestampUS, endUS, chunkBytes, durationUS)
 		results = append(results, BroadcastResult{MemberID: m.ID, Sent: true})
 	}
 	return results

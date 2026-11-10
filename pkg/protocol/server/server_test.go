@@ -5,6 +5,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,34 @@ import (
 	"github.com/Sendspin/sendspin-go/pkg/protocol/session"
 	"github.com/gorilla/websocket"
 )
+
+// TestImplementedRoles_DeclinesUnservableRoles asserts the server only ever
+// activates the role it can actually serve (player), honoring the spec's
+// "MAY omit a role" and "MUST NOT activate a server/state-defining role until
+// it can deliver its state object" rules.
+func TestImplementedRoles_DeclinesUnservableRoles(t *testing.T) {
+	hello := session.ClientHello{
+		Name:           "rich-client",
+		SupportedRoles: []string{"player@v1", "visualizer@v1", "source@v1", "color@v1", "artwork@v1", "metadata@v1", "controller@v1"},
+	}
+	got := ImplementedRoles(hello)
+	if want := []string{"player@v1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ImplementedRoles = %v, want %v", got, want)
+	}
+
+	// A newer player version wins (client priority), everything else still
+	// declined.
+	hello.SupportedRoles = []string{"player@v2", "player@v1", "visualizer@v1"}
+	if got := ImplementedRoles(hello); !reflect.DeepEqual(got, []string{"player@v2"}) {
+		t.Errorf("ImplementedRoles = %v, want [player@v2]", got)
+	}
+
+	// A client without a player role gets nothing activated.
+	hello.SupportedRoles = []string{"metadata@v1"}
+	if got := ImplementedRoles(hello); len(got) != 0 {
+		t.Errorf("ImplementedRoles = %v, want none", got)
+	}
+}
 
 // harness stands up a Server behind a WebSocket endpoint and returns it, the
 // http server, and a channel delivering each Handle call's return value.
@@ -61,7 +90,6 @@ func dialAndEstablish(t *testing.T, srv *httptest.Server, id *secure.Identity) *
 	}
 	hello := session.ClientHello{
 		Name:           "test-player",
-		TrustLevel:     session.TrustNone,
 		SupportedRoles: []string{"player@v1"},
 		UnpairedAccess: session.UnpairedAccess{Enabled: true},
 	}
@@ -128,10 +156,9 @@ func TestServer_ClockSyncAndClientState(t *testing.T) {
 
 	// client/state makes the player available and sets its timing; a following
 	// client/time round-trip is a barrier proving the state was applied.
-	avail := true
 	minBuf := 100
 	sendControl(t, conn, session.ClientState{
-		Available: &avail,
+		Available: true,
 		Player:    &session.ClientPlayerState{MinBufferMs: &minBuf},
 	})
 	sendControl(t, conn, session.ClientTime{ClientTransmitted: 43})

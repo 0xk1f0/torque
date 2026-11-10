@@ -65,10 +65,10 @@ func TestPairingPSK_FullRoundTrip(t *testing.T) {
 
 	go func() {
 		sess, err := EstablishServer(serverConn, ServerConfig{
-			ServerName:         "pair-server",
-			PSKCategory:        PSKPairing,
-			InitialActivities:  []Activity{ActivityPairing},
-			SelectedPairMethod: PairMethodPairingPSK,
+			ServerName:        "pair-server",
+			PSKCategory:       PSKPairing,
+			InitialActivities: []Activity{ActivityPairing},
+			Pairing:           &Pairing{Method: PairMethodPairingPSK},
 		})
 		if err != nil {
 			errCh <- err
@@ -89,7 +89,7 @@ func TestPairingPSK_FullRoundTrip(t *testing.T) {
 	}()
 
 	hello := testHello(false)
-	hello.SupportedPairMethods = []PairMethodDescriptor{{Method: PairMethodPairingPSK}}
+	hello.SupportedPairMethods = SupportedPairMethods{string(PairMethodPairingPSK): {}}
 	clientSess, err := EstablishClient(clientConn, ClientConfig{
 		Hello:       hello,
 		PSKCategory: PSKPairing,
@@ -97,14 +97,13 @@ func TestPairingPSK_FullRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client establish (pairing): %v", err)
 	}
-	if clientSess.Activate.SelectedPairMethod != PairMethodPairingPSK {
-		t.Errorf("selected method = %q", clientSess.Activate.SelectedPairMethod)
+	if clientSess.Activate.Pairing.Method != PairMethodPairingPSK {
+		t.Errorf("selected method = %q", clientSess.Activate.Pairing.Method)
 	}
 
 	longTerm, _ := secure.NewPSK()
 	clientStore := NewMemoryPairingStore()
 	resultingHello := testHello(false)
-	resultingHello.TrustLevel = TrustUser
 	afterClient, err := clientSess.CompletePairingPSKClient(longTerm, clientStore.PutRecord, resultingHello)
 	if err != nil {
 		t.Fatalf("client pairing: %v", err)
@@ -123,10 +122,8 @@ func TestPairingPSK_FullRoundTrip(t *testing.T) {
 		if len(cliRecords) != 1 || cliRecords[0].PSK != longTerm {
 			t.Errorf("client records = %+v", cliRecords)
 		}
-		// The re-established session is at long-term trust with playback.
-		if afterServer.Hello.TrustLevel != TrustUser {
-			t.Errorf("post-pairing trust = %q, want user", afterServer.Hello.TrustLevel)
-		}
+		// The re-established session is at long-term trust with playback
+		// (roles only exist on a playback-capable, i.e. long-term, session).
 		if len(afterServer.ActiveRoles) == 0 {
 			t.Error("post-pairing session activated no roles")
 		}
@@ -152,10 +149,10 @@ func TestPairingPSK_ClientAbortSurfaces(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		sess, err := EstablishServer(serverConn, ServerConfig{
-			ServerName:         "pair-server",
-			PSKCategory:        PSKPairing,
-			InitialActivities:  []Activity{ActivityPairing},
-			SelectedPairMethod: PairMethodPairingPSK,
+			ServerName:        "pair-server",
+			PSKCategory:       PSKPairing,
+			InitialActivities: []Activity{ActivityPairing},
+			Pairing:           &Pairing{Method: PairMethodPairingPSK},
 		})
 		if err != nil {
 			errCh <- err
@@ -169,7 +166,7 @@ func TestPairingPSK_ClientAbortSurfaces(t *testing.T) {
 	}()
 
 	hello := testHello(false)
-	hello.SupportedPairMethods = []PairMethodDescriptor{{Method: PairMethodPairingPSK}}
+	hello.SupportedPairMethods = SupportedPairMethods{string(PairMethodPairingPSK): {}}
 	clientSess, err := EstablishClient(clientConn, ClientConfig{Hello: hello, PSKCategory: PSKPairing})
 	if err != nil {
 		t.Fatal(err)

@@ -5,22 +5,22 @@ package session
 import "testing"
 
 func TestRuntimeMessages_RoundTrip(t *testing.T) {
-	avail := true
 	vol := 80
 	mute := false
-	sd, lead, minb, cap := 10, 200, 150, 65536
+	od, lead, minb := 10, 200, 150
 	cases := []any{
 		&ClientState{
-			Available: &avail,
+			Available: true,
 			Player: &ClientPlayerState{
-				StaticDelayMs: &sd, RequiredLeadTimeMs: &lead, MinBufferMs: &minb,
-				BufferCapacity: &cap, Volume: &vol, Mute: &mute,
-				SupportedCommands: []string{"set_static_delay"},
+				OutputDelayMs: &od, RequiredLeadTimeMs: &lead, MinBufferMs: &minb,
+				Volume: &vol, Muted: &mute,
+				SupportedCommands: []string{"set_output_delay"},
 			},
 		},
 		&GroupUpdate{PlaybackState: PlaybackPlaying, GroupID: "g1", GroupName: "Kitchen"},
 		&StreamStart{ServerTransmitted: 123456, Player: &StreamStartPlayer{Codec: "opus", Channels: 2, SampleRate: 48000, BitDepth: 16}},
-		&StreamEnd{ServerTransmitted: 789, Roles: []string{"player"}},
+		&StreamClear{ServerTransmitted: 456, FromTimestamp: nil, Roles: []string{"player"}},
+		&StreamEnd{Roles: []string{"player"}},
 	}
 	for _, want := range cases {
 		raw, err := Marshal(want)
@@ -37,10 +37,11 @@ func TestRuntimeMessages_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestClientState_DeltaOmitsAbsentFields(t *testing.T) {
-	// A delta carrying only min_buffer_ms must not serialize the other fields.
+func TestClientState_AlwaysCarriesAvailable(t *testing.T) {
+	// Per the spec, every client/state carries `available`. A delta with a
+	// player update must still serialize it.
 	minb := 300
-	raw, err := Marshal(&ClientState{Player: &ClientPlayerState{MinBufferMs: &minb}})
+	raw, err := Marshal(&ClientState{Available: true, Player: &ClientPlayerState{MinBufferMs: &minb}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,14 +53,33 @@ func TestClientState_DeltaOmitsAbsentFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("parsed %T, want *ClientState", got)
 	}
-	if st.Available != nil {
-		t.Error("available present in a delta that omitted it")
+	if !st.Available {
+		t.Error("available must round-trip as true on every client/state")
 	}
 	if st.Player == nil || st.Player.MinBufferMs == nil || *st.Player.MinBufferMs != 300 {
 		t.Errorf("min_buffer_ms not round-tripped: %+v", st.Player)
 	}
-	if st.Player.StaticDelayMs != nil || st.Player.Volume != nil {
+	if st.Player.OutputDelayMs != nil || st.Player.Volume != nil || st.Player.Muted != nil {
 		t.Error("absent player fields should be nil after a delta round-trip")
+	}
+}
+
+func TestStreamClear_FromTimestampRoundTrip(t *testing.T) {
+	from := int64(123_000)
+	raw, err := Marshal(&StreamClear{ServerTransmitted: 100, FromTimestamp: &from, Roles: []string{"player"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc, ok := got.(*StreamClear)
+	if !ok {
+		t.Fatalf("parsed %T, want *StreamClear", got)
+	}
+	if sc.FromTimestamp == nil || *sc.FromTimestamp != from {
+		t.Errorf("from_timestamp = %v, want %d", sc.FromTimestamp, from)
 	}
 }
 

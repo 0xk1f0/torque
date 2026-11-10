@@ -42,7 +42,7 @@ func TestGroupManager_VolumeRedistribution(t *testing.T) {
 
 	// A at 0, B at default 100 → group average 50.
 	zero := 0
-	if err := m.ApplyClientState("A", ClientState{Player: &ClientPlayerState{Volume: &zero}}); err != nil {
+	if err := m.ApplyClientState("A", ClientState{Available: true, Player: &ClientPlayerState{Volume: &zero}}); err != nil {
 		t.Fatal(err)
 	}
 	if v := m.GroupVolume(gid); v != 50 {
@@ -125,13 +125,13 @@ func TestGroupManager_MuteReflectsClientState(t *testing.T) {
 
 	// Group mute is true only when ALL members are muted.
 	yes := true
-	if err := m.ApplyClientState("A", ClientState{Player: &ClientPlayerState{Mute: &yes}}); err != nil {
+	if err := m.ApplyClientState("A", ClientState{Available: true, Player: &ClientPlayerState{Muted: &yes}}); err != nil {
 		t.Fatal(err)
 	}
 	if m.GroupMuted(gid) {
 		t.Error("group muted with only one member muted")
 	}
-	if err := m.ApplyClientState("B", ClientState{Player: &ClientPlayerState{Mute: &yes}}); err != nil {
+	if err := m.ApplyClientState("B", ClientState{Available: true, Player: &ClientPlayerState{Muted: &yes}}); err != nil {
 		t.Fatal(err)
 	}
 	if !m.GroupMuted(gid) {

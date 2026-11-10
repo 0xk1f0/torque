@@ -117,12 +117,12 @@ func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
 		t.Fatalf("EstablishServer against dotnet host: %v", err)
 	}
 	t.Logf("session established: client=%q trust=%s roles=%v",
-		sess.Hello.Name, sess.Hello.TrustLevel, sess.ActiveRoles)
+		sess.Hello.Name, sess, sess.ActiveRoles)
 	if !sess.Hello.UnpairedAccess.Enabled {
 		t.Fatal("dotnet host did not advertise unpaired access")
 	}
-	if sess.Hello.TrustLevel != TrustNone {
-		t.Errorf("trust level = %q, want none", sess.Hello.TrustLevel)
+	if sess != TrustNone {
+		t.Errorf("trust level = %q, want none", sess)
 	}
 
 	// Service the connection while awaiting the verdict.
@@ -172,10 +172,10 @@ func TestInterop_PairingPSKAgainstDotnetHost(t *testing.T) {
 	t.Logf("noise handshake on pairing psk: suite=%s client=%s", ci.Suite, ci.ClientID)
 
 	sess, err := EstablishServer(conn, ServerConfig{
-		ServerName:         "go-pairing-server",
-		PSKCategory:        PSKPairing,
-		InitialActivities:  []Activity{ActivityPairing},
-		SelectedPairMethod: PairMethodPairingPSK,
+		ServerName:        "go-pairing-server",
+		PSKCategory:       PSKPairing,
+		InitialActivities: []Activity{ActivityPairing},
+		Pairing:           &Pairing{Method: PairMethodPairingPSK},
 	})
 	if err != nil {
 		t.Fatalf("EstablishServer (pairing): %v", err)
@@ -193,9 +193,9 @@ func TestInterop_PairingPSKAgainstDotnetHost(t *testing.T) {
 	if len(records) != 1 || records[0].PeerID != ci.ClientID {
 		t.Fatalf("server records after pairing = %+v", records)
 	}
-	t.Logf("post-pairing session: trust=%s roles=%v", after.Hello.TrustLevel, after.ActiveRoles)
-	if after.Hello.TrustLevel != TrustUser {
-		t.Errorf("post-pairing trust = %q, want user", after.Hello.TrustLevel)
+	t.Logf("post-pairing session: trust=%s roles=%v", after, after.ActiveRoles)
+	if after != TrustUser {
+		t.Errorf("post-pairing trust = %q, want user", after)
 	}
 
 	go func() {

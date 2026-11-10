@@ -25,11 +25,16 @@ func runPINPairing(t *testing.T, serverCfg PINPairingServerConfig, clientCfg PIN
 	}, 1)
 
 	go func() {
+		pairing := &Pairing{Method: PairingMethod(serverCfg.Method)}
+		if serverCfg.Method == PairMethodDynamicPIN {
+			f := PairingFormatDigits
+			pairing.Format = &f
+		}
 		sess, err := EstablishServer(serverConn, ServerConfig{
-			ServerName:         "pin-server",
-			PSKCategory:        PSKSentinel,
-			InitialActivities:  []Activity{ActivityPairing},
-			SelectedPairMethod: serverCfg.Method,
+			ServerName:        "pin-server",
+			PSKCategory:       PSKSentinel,
+			InitialActivities: []Activity{ActivityPairing},
+			Pairing:           pairing,
 		})
 		if err != nil {
 			srvOut <- struct {
@@ -59,9 +64,13 @@ func runPINPairing(t *testing.T, serverCfg PINPairingServerConfig, clientCfg PIN
 	return <-res
 }
 
-func pinClientHello(methods ...PairMethodDescriptor) ClientHello {
+func pinClientHello(methods ...string) ClientHello {
 	h := testHello(false)
-	h.SupportedPairMethods = methods
+	spm := SupportedPairMethods{}
+	for _, m := range methods {
+		spm[m] = PairMethodDescriptor{}
+	}
+	h.SupportedPairMethods = spm
 	return h
 }
 
@@ -70,8 +79,7 @@ func TestPINPairing_DynamicFullRoundTrip(t *testing.T) {
 	clientStore := NewMemoryPairingStore()
 	serverStore := NewMemoryPairingStore()
 
-	resultingHello := testHello(false)
-	resultingHello.TrustLevel = TrustUser
+	resultingHello := testHello(true)
 
 	// The operator waits to see the PIN on the client's out-channel before
 	// typing it into the server; model that with a channel so ProvidePIN
@@ -94,7 +102,7 @@ func TestPINPairing_DynamicFullRoundTrip(t *testing.T) {
 			Persist:        clientStore.PutRecord,
 			ResultingHello: resultingHello,
 		},
-		pinClientHello(PairMethodDescriptor{Method: PairMethodDynamicPIN, MinPINLength: pinLen}),
+		pinClientHello(PairMethodDynamicPIN),
 	)
 
 	if res.serverErr != nil {
@@ -111,8 +119,7 @@ func TestPINPairing_StaticFullRoundTrip(t *testing.T) {
 	clientStore := NewMemoryPairingStore()
 	serverStore := NewMemoryPairingStore()
 
-	resultingHello := testHello(false)
-	resultingHello.TrustLevel = TrustUser
+	resultingHello := testHello(true)
 
 	res := runPINPairing(t,
 		PINPairingServerConfig{
@@ -129,7 +136,7 @@ func TestPINPairing_StaticFullRoundTrip(t *testing.T) {
 			Persist:        clientStore.PutRecord,
 			ResultingHello: resultingHello,
 		},
-		pinClientHello(PairMethodDescriptor{Method: PairMethodStaticPIN}),
+		pinClientHello(PairMethodStaticPIN),
 	)
 
 	if res.serverErr != nil {
@@ -157,7 +164,7 @@ func TestPINPairing_WrongStaticPINAborts(t *testing.T) {
 			Persist:        NewMemoryPairingStore().PutRecord,
 			ResultingHello: testHello(false),
 		},
-		pinClientHello(PairMethodDescriptor{Method: PairMethodStaticPIN}),
+		pinClientHello(PairMethodStaticPIN),
 	)
 
 	// The client verifies server_kc first and fails, aborting pin_mismatch;
@@ -185,7 +192,7 @@ func TestPINPairing_PINLengthUnacceptableAborts(t *testing.T) {
 			Persist:        NewMemoryPairingStore().PutRecord,
 			ResultingHello: testHello(false),
 		},
-		pinClientHello(PairMethodDescriptor{Method: PairMethodDynamicPIN, MinPINLength: 6}),
+		pinClientHello(PairMethodDynamicPIN),
 	)
 	assertPairAbort(t, res.clientErr, AbortPINLengthUnacceptable)
 }
@@ -194,9 +201,6 @@ func assertPairedBothSides(t *testing.T, res pinResult, serverStore, clientStore
 	t.Helper()
 	if res.serverSess == nil || res.clientSess == nil {
 		t.Fatal("pairing produced no post-session")
-	}
-	if res.serverSess.Hello.TrustLevel != TrustUser {
-		t.Errorf("server post-pairing trust = %q, want user", res.serverSess.Hello.TrustLevel)
 	}
 	sr := serverStore.Records()
 	cr := clientStore.Records()
@@ -233,8 +237,7 @@ func TestPINPairing_DynamicVariousLengths(t *testing.T) {
 		var emittedLen int
 		serverStore := NewMemoryPairingStore()
 		clientStore := NewMemoryPairingStore()
-		resultingHello := testHello(false)
-		resultingHello.TrustLevel = TrustUser
+		resultingHello := testHello(true)
 		pinCh := make(chan string, 1)
 
 		res := runPINPairing(t,
@@ -249,7 +252,7 @@ func TestPINPairing_DynamicVariousLengths(t *testing.T) {
 				EmitPIN: func(p string) { emittedLen = len(p); pinCh <- p },
 				Persist: clientStore.PutRecord, ResultingHello: resultingHello,
 			},
-			pinClientHello(PairMethodDescriptor{Method: PairMethodDynamicPIN, MinPINLength: 4}),
+			pinClientHello(PairMethodDynamicPIN),
 		)
 		if res.serverErr != nil || res.clientErr != nil {
 			t.Fatalf("len %d: server=%v client=%v", pinLen, res.serverErr, res.clientErr)

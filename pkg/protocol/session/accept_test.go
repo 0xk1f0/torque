@@ -147,7 +147,8 @@ func TestAccept_PairThenReconnectAsPaired(t *testing.T) {
 		}
 		sess, err := EstablishServer(conn, ServerConfig{
 			ServerName: "accept-server", PSKCategory: PSKPairing,
-			InitialActivities: []Activity{ActivityPairing}, SelectedPairMethod: PairMethodPairingPSK,
+			InitialActivities: []Activity{ActivityPairing},
+			Pairing:           &Pairing{Method: PairMethodPairingPSK},
 		})
 		if err != nil {
 			pairDone <- err
@@ -176,14 +177,13 @@ func TestAccept_PairThenReconnectAsPaired(t *testing.T) {
 		t.Fatal(err)
 	}
 	pairHello := testHello(false)
-	pairHello.SupportedPairMethods = []PairMethodDescriptor{{Method: PairMethodPairingPSK}}
+	pairHello.SupportedPairMethods = SupportedPairMethods{string(PairMethodPairingPSK): {}}
 	cs, err := EstablishClient(pconn, ClientConfig{Hello: pairHello, PSKCategory: PSKPairing})
 	if err != nil {
 		t.Fatal(err)
 	}
 	longTerm, _ := secure.NewPSK()
-	resultHello := testHello(false)
-	resultHello.TrustLevel = TrustUser
+	resultHello := testHello(true)
 	if _, err := cs.CompletePairingPSKClient(longTerm, clientStore.PutRecord, resultHello); err != nil {
 		t.Fatalf("client pairing: %v", err)
 	}
@@ -214,8 +214,7 @@ func TestAccept_PairThenReconnectAsPaired(t *testing.T) {
 	})
 	defer conn.Close()
 
-	pairedHello := testHello(false)
-	pairedHello.TrustLevel = TrustUser
+	pairedHello := testHello(true)
 	clientSess, err := EstablishClient(conn, ClientConfig{Hello: pairedHello, PSKCategory: PSKLongTerm})
 	if err != nil {
 		t.Fatalf("paired client establish: %v", err)

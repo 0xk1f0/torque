@@ -3,21 +3,21 @@ package playback
 
 import "fmt"
 
-// Spec bounds for static_delay_ms.
+// Spec bounds for output_delay_ms.
 const (
-	MinStaticDelayMs = 0
-	MaxStaticDelayMs = 5000
+	MinOutputDelayMs = 0
+	MaxOutputDelayMs = 5000
 )
 
 // Timing is a player's server-tracked timing state, populated from the
-// player object of client/state. All three fields are required in a player's
+// player object of client/state. All timing fields are required in a player's
 // initial (full) state; later updates may carry a subset (see MergeDelta).
 type Timing struct {
-	// StaticDelayMs shifts playback later to compensate for downstream
-	// hardware latency beyond the audio port (0–5000). The server applies it
-	// separately when computing send-ahead — clients do not fold it into the
-	// two fields below.
-	StaticDelayMs int
+	// OutputDelayMs compensates for downstream hardware latency beyond the
+	// audio port (external speakers, amplifiers): 0–5000. The server applies
+	// it separately when computing send-ahead and buffer-completion times —
+	// clients do not fold it into the two fields below.
+	OutputDelayMs int
 	// RequiredLeadTimeMs is the startup lead a player needs so the first
 	// chunk is not cut off (codec init, decode warmup, DAC latency). A hint:
 	// the server may grant less.
@@ -33,7 +33,7 @@ type Timing struct {
 // TimingDelta is a client/state player-object update. A nil field was absent
 // from the message and leaves the corresponding Timing value unchanged.
 type TimingDelta struct {
-	StaticDelayMs      *int
+	OutputDelayMs      *int
 	RequiredLeadTimeMs *int
 	MinBufferMs        *int
 	BufferCapacity     *int
@@ -42,8 +42,8 @@ type TimingDelta struct {
 // Validate checks a fully-populated Timing against spec bounds. Use it on a
 // player's initial (full) state.
 func (t Timing) Validate() error {
-	if t.StaticDelayMs < MinStaticDelayMs || t.StaticDelayMs > MaxStaticDelayMs {
-		return fmt.Errorf("static_delay_ms %d out of range [%d,%d]", t.StaticDelayMs, MinStaticDelayMs, MaxStaticDelayMs)
+	if t.OutputDelayMs < MinOutputDelayMs || t.OutputDelayMs > MaxOutputDelayMs {
+		return fmt.Errorf("output_delay_ms %d out of range [%d,%d]", t.OutputDelayMs, MinOutputDelayMs, MaxOutputDelayMs)
 	}
 	if t.RequiredLeadTimeMs < 0 {
 		return fmt.Errorf("required_lead_time_ms %d must be >= 0", t.RequiredLeadTimeMs)
@@ -59,19 +59,19 @@ func (t Timing) Validate() error {
 
 // MergeDelta applies a client/state delta, retaining the last value of any
 // absent field (spec: the server merges each update into existing state).
-// static_delay_ms is clamped into range rather than rejected, matching the
+// output_delay_ms is clamped into range rather than rejected, matching the
 // scheduler's tolerance for a misbehaving client.
 func (t Timing) MergeDelta(d TimingDelta) Timing {
 	out := t
-	if d.StaticDelayMs != nil {
-		v := *d.StaticDelayMs
-		if v < MinStaticDelayMs {
-			v = MinStaticDelayMs
+	if d.OutputDelayMs != nil {
+		v := *d.OutputDelayMs
+		if v < MinOutputDelayMs {
+			v = MinOutputDelayMs
 		}
-		if v > MaxStaticDelayMs {
-			v = MaxStaticDelayMs
+		if v > MaxOutputDelayMs {
+			v = MaxOutputDelayMs
 		}
-		out.StaticDelayMs = v
+		out.OutputDelayMs = v
 	}
 	if d.RequiredLeadTimeMs != nil && *d.RequiredLeadTimeMs >= 0 {
 		out.RequiredLeadTimeMs = *d.RequiredLeadTimeMs

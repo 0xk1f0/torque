@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/Sendspin/sendspin-go/pkg/protocol/playback"
@@ -62,12 +63,33 @@ func New(cfg Config) (*Server, error) {
 	if clock == nil {
 		clock = monotonicMicros()
 	}
+	// Never activate a role the server cannot actually serve (spec: servers
+	// MAY omit roles, and MUST NOT activate a server/state-defining role
+	// until they can deliver its state object). Server.Handle implements the
+	// player role (audio streaming + clock/state); metadata/controller/
+	// artwork/visualizer/source/color are declined until implemented.
+	if cfg.ChooseActiveRoles == nil {
+		cfg.ChooseActiveRoles = ImplementedRoles
+	}
 	gm := session.NewGroupManager(session.GroupManagerConfig{
 		SourceKind:  cfg.SourceKind,
 		NextGroupID: cfg.NextGroupID,
 		Now:         clock,
 	})
 	return &Server{cfg: cfg, clock: clock, groups: gm}, nil
+}
+
+// ImplementedRoles is the default role-activation policy for this server:
+// the client's preferred `player@vN` (first offered) is activated, and every
+// other role family is declined because Server.Handle does not implement it.
+// Customize via Config.ChooseActiveRoles per deployment.
+func ImplementedRoles(hello session.ClientHello) []string {
+	for _, role := range hello.SupportedRoles {
+		if family, _, ok := strings.Cut(role, "@"); ok && family == "player" {
+			return []string{role}
+		}
+	}
+	return []string{}
 }
 
 // Groups exposes the group manager so an audio loop can broadcast into the

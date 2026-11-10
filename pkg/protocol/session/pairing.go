@@ -9,11 +9,12 @@ import (
 	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
 )
 
-// Pair method identifiers.
+// Pair method identifiers (deprecated spellings retained so the pairing
+// internals below stay usable; the wire identifiers live in messages.go and
+// match the spec: pairing_psk / dynamic_pairing_code / static_pairing_code).
 const (
-	PairMethodPairingPSK = "pairing_psk"
-	PairMethodDynamicPIN = "dynamic_pin"
-	PairMethodStaticPIN  = "static_pin"
+	PairMethodDynamicPIN string = "dynamic_pairing_code"
+	PairMethodStaticPIN  string = "static_pairing_code"
 )
 
 // Pairing message payloads (registered in messages.go's envelope registry).

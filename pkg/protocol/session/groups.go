@@ -4,7 +4,7 @@ package session
 
 import (
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
 	"math"
 	"sync"
@@ -134,32 +134,29 @@ func (m *GroupManager) Leave(clientID string) {
 
 // ApplyClientState is the single entry point a client/state handler calls: it
 // merges any player timing delta into the client's tracked timing, then applies
-// an availability change through the group-move choreography. Absent fields are
-// left unchanged.
+// the availability change through the group-move choreography. Per the spec
+// every client/state carries `available`; absent (zero) is treated as
+// available:false — a non-compliant peer, but safe.
 func (m *GroupManager) ApplyClientState(clientID string, st ClientState) error {
 	if st.Player != nil {
 		m.mu.Lock()
 		if mi := m.members[clientID]; mi != nil {
 			mi.timing = mi.timing.MergeDelta(playback.TimingDelta{
-				StaticDelayMs:      st.Player.StaticDelayMs,
+				OutputDelayMs:      st.Player.OutputDelayMs,
 				RequiredLeadTimeMs: st.Player.RequiredLeadTimeMs,
 				MinBufferMs:        st.Player.MinBufferMs,
-				BufferCapacity:     st.Player.BufferCapacity,
 			})
 			m.groups[mi.groupID].SetTiming(clientID, mi.timing)
 			if st.Player.Volume != nil {
 				mi.volume = clampVolume(*st.Player.Volume)
 			}
-			if st.Player.Mute != nil {
-				mi.muted = *st.Player.Mute
+			if st.Player.Muted != nil {
+				mi.muted = *st.Player.Muted
 			}
 		}
 		m.mu.Unlock()
 	}
-	if st.Available != nil {
-		return m.SetAvailable(clientID, *st.Available)
-	}
-	return nil
+	return m.SetAvailable(clientID, st.Available)
 }
 
 // SetAvailable applies an availability change. On available:false it quiesces
@@ -214,8 +211,44 @@ func (m *GroupManager) StartGroup(groupID string, format StreamStartPlayer) erro
 	update := m.groupUpdate(groupID)
 	var sends []pendingSend
 	for _, id := range m.memberIDs(groupID) {
-		conn := m.members[id].conn
-		sends = append(sends, pendingSend{conn, update}, pendingSend{conn, start})
+		mi := m.members[id]
+		sends = append(sends, pendingSend{mi.conn, update})
+		// stream/start MUST NOT be sent before the client's initial
+		// client/state reports available:true (spec). Unavailable members get
+		// their stream/start when they become available in a playing group
+		// (MoveToGroup/RejoinPreviousGroup send it then).
+		if mi.available {
+			sends = append(sends, pendingSend{mi.conn, start})
+		}
+	}
+	m.mu.Unlock()
+	return flush(sends)
+}
+
+// ClearStream sends stream/clear to a group's available members and clears
+// their player buffers. It is used for seeks, track jumps, and announcements:
+// unlike stream/end it does not end the stream. fromTimestamp, when non-nil,
+// limits the clear to buffered audio at or after that server-clock time.
+func (m *GroupManager) ClearStream(groupID string, fromTimestamp *int64) error {
+	m.mu.Lock()
+	g := m.groups[groupID]
+	if g == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("unknown group %q", groupID)
+	}
+	clear := StreamClear{ServerTransmitted: m.now(), FromTimestamp: fromTimestamp, Roles: []string{"player"}}
+	var sends []pendingSend
+	for _, id := range m.memberIDs(groupID) {
+		mi := m.members[id]
+		if !mi.available {
+			continue
+		}
+		sends = append(sends, pendingSend{mi.conn, clear})
+	}
+	// Clear the manager's buffer state so the audio pump re-quantifies from
+	// the new timeline (full clear) or keeps only pre-fromTimestamp audio.
+	for _, id := range m.memberIDs(groupID) {
+		g.ClearBuffers(id, fromTimestamp)
 	}
 	m.mu.Unlock()
 	return flush(sends)
@@ -478,7 +511,7 @@ func (m *GroupManager) quiesceToSoloStopped(clientID string) []pendingSend {
 		wasPlaying := m.states[prevGID] == PlaybackPlaying
 		var sends []pendingSend
 		if wasPlaying {
-			sends = append(sends, pendingSend{mi.conn, StreamEnd{ServerTransmitted: m.now()}})
+			sends = append(sends, pendingSend{mi.conn, StreamEnd{}})
 		}
 		g.Remove(clientID)
 		m.deleteIfEmpty(prevGID)
@@ -501,12 +534,14 @@ func (m *GroupManager) stopGroupLocked(groupID string) []pendingSend {
 	}
 	m.states[groupID] = PlaybackStopped
 	delete(m.formats, groupID)
-	end := StreamEnd{ServerTransmitted: m.now()}
+	end := StreamEnd{}
 	update := m.groupUpdate(groupID)
 	var sends []pendingSend
 	for _, id := range m.memberIDs(groupID) {
 		conn := m.members[id].conn
 		sends = append(sends, pendingSend{conn, end}, pendingSend{conn, update})
+		// stream/end resets the member's buffer accounting per the spec.
+		m.groups[groupID].ClearBuffers(id, nil)
 	}
 	return sends
 }
@@ -571,8 +606,11 @@ func clampVolume(v int) int {
 	return v
 }
 
+// randomGroupID mints a spec-compliant group_id: 32 server-chosen bytes
+// base64url-encoded without padding (43 characters). A compliant client MUST
+// treat any other encoding as a protocol error, so the hex form is gone.
 func randomGroupID() string {
-	var b [16]byte
+	var b [32]byte
 	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+	return base64.RawURLEncoding.EncodeToString(b[:])
 }

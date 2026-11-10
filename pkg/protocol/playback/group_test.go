@@ -23,7 +23,7 @@ func (w *recordWriter) WriteMessage(msgType byte, payload []byte) error {
 }
 
 func timing(minBuf, lead, staticDelay, cap int) Timing {
-	return Timing{MinBufferMs: minBuf, RequiredLeadTimeMs: lead, StaticDelayMs: staticDelay, BufferCapacity: cap}
+	return Timing{MinBufferMs: minBuf, RequiredLeadTimeMs: lead, OutputDelayMs: staticDelay, BufferCapacity: cap}
 }
 
 // constPayload returns the same payload for every member.
@@ -98,7 +98,7 @@ func TestGroup_Broadcast_AvailableOnly(t *testing.T) {
 	if frame[0] != PlayerAudioMsgType {
 		t.Errorf("msg type = %d, want %d", frame[0], PlayerAudioMsgType)
 	}
-	ts, payload, err := ParseAudioChunk(frame[1:])
+	ts, _, payload, err := ParseAudioChunk(frame[1:])
 	if err != nil {
 		t.Fatalf("parse chunk: %v", err)
 	}
@@ -136,12 +136,13 @@ func TestGroup_Broadcast_PerMemberPayloadAndSkip(t *testing.T) {
 func TestGroup_Broadcast_BufferCapacityBackpressure(t *testing.T) {
 	w := &recordWriter{}
 	g := NewGroup(SourceLive)
-	// buffer_capacity = 5 bytes; codec byte rate irrelevant to the byte cap.
-	g.Add("a", w, timing(100, 0, 0, 5), 0)
+	// buffer_capacity counts the 13-byte message header plus the payload, so a
+	// 3-byte payload costs 16 bytes; two chunks won't fit in 16.
+	g.Add("a", w, timing(100, 0, 0, 16), 0)
 	g.SetAvailable("a", true)
 
-	payload := []byte{0x01, 0x02, 0x03} // 3 bytes; two won't fit in 5.
-	// First chunk fits (3 <= 5) and plays 0..20ms.
+	payload := []byte{0x01, 0x02, 0x03} // 3 bytes; with the 13-byte header, 16 total.
+	// First chunk fits (16 <= 16) and plays 0..20ms.
 	res1 := g.Broadcast(0, 0, 20_000, constPayload(payload))
 	if len(res1) != 1 || !res1[0].Sent {
 		t.Fatalf("chunk 1 = %+v, want sent", res1)
@@ -188,11 +189,12 @@ func TestGroup_SetTiming_UpdatesSendAheadAndCapacity(t *testing.T) {
 	if sa := g.SendAheadMs(); sa != 100 {
 		t.Fatalf("send-ahead = %d, want 100", sa)
 	}
-	g.SetTiming("a", timing(300, 0, 50, 10))
+	g.SetTiming("a", timing(300, 0, 50, 23))
 	if sa := g.SendAheadMs(); sa != 350 {
 		t.Errorf("send-ahead = %d, want 350 (300 min + 50 static)", sa)
 	}
-	// New capacity of 10 now admits a 10-byte chunk that 5 would have rejected.
+	// New capacity of 23 now admits a 10-byte chunk (23 = 13 header + 10
+	// payload) that a capacity of 5 would have rejected.
 	res := g.Broadcast(0, 0, 20_000, constPayload(make([]byte, 10)))
 	if len(res) != 1 || !res[0].Sent {
 		t.Errorf("chunk = %+v, want sent under new capacity", res)

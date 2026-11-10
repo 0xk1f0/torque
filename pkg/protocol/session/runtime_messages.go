@@ -16,43 +16,45 @@ const (
 func (p PlaybackState) Valid() bool { return p == PlaybackPlaying || p == PlaybackStopped }
 
 // ClientState is the client→server client/state message: availability plus an
-// optional player sub-object. Every field is a pointer so a delta update
-// (carrying only the changed fields, which the server merges into existing
-// state) is distinguishable from an initial full state where all are present.
+// optional player sub-object. Per the spec `available` MUST be present in
+// every message; the player object carries only the changed fields when it is
+// a delta update (the server merges into existing state).
 type ClientState struct {
-	Available *bool              `json:"available,omitempty"`
+	Available bool               `json:"available"`
 	Player    *ClientPlayerState `json:"player,omitempty"`
 }
 
 // ClientPlayerState is the player object of client/state: the timing fields the
-// server's send-ahead scheduler consumes plus volume/mute and the optional
-// supported-command list. Pointers mark absent (unchanged) fields in a delta.
+// server's send-ahead scheduler consumes, volume/mute, the supported-command
+// list, and an optional preferred format. Pointers mark absent (unchanged)
+// fields in a delta. buffer_capacity is NOT part of this object — it lives in
+// player@v1_support in client/hello.
 type ClientPlayerState struct {
-	StaticDelayMs      *int     `json:"static_delay_ms,omitempty"`
-	RequiredLeadTimeMs *int     `json:"required_lead_time_ms,omitempty"`
-	MinBufferMs        *int     `json:"min_buffer_ms,omitempty"`
-	BufferCapacity     *int     `json:"buffer_capacity,omitempty"`
-	Volume             *int     `json:"volume,omitempty"`
-	Mute               *bool    `json:"mute,omitempty"`
-	SupportedCommands  []string `json:"supported_commands,omitempty"`
+	OutputDelayMs      *int         `json:"output_delay_ms,omitempty"`
+	RequiredLeadTimeMs *int         `json:"required_lead_time_ms,omitempty"`
+	MinBufferMs        *int         `json:"min_buffer_ms,omitempty"`
+	Volume             *int         `json:"volume,omitempty"`
+	Muted              *bool        `json:"muted,omitempty"`
+	SupportedCommands  []string     `json:"supported_commands,omitempty"`
+	Format             *AudioFormat `json:"format,omitempty"`
 }
 
-// GroupUpdate is the server→client group/update message. It carries delta
-// updates — only the changed fields are present — that the client merges into
-// its group state.
+// GroupUpdate is the server→client group/update message. Per the spec every
+// message MUST carry all three fields (full state, not a delta).
 type GroupUpdate struct {
-	PlaybackState PlaybackState `json:"playback_state,omitempty"`
-	GroupID       string        `json:"group_id,omitempty"`
-	GroupName     string        `json:"group_name,omitempty"`
+	PlaybackState PlaybackState `json:"playback_state"`
+	GroupID       string        `json:"group_id"`
+	GroupName     string        `json:"group_name"`
 }
 
 // StreamStartPlayer is the negotiated player audio format carried in
 // stream/start.
 type StreamStartPlayer struct {
-	Codec      string `json:"codec"`
-	Channels   int    `json:"channels"`
-	SampleRate int    `json:"sample_rate"`
-	BitDepth   int    `json:"bit_depth"`
+	Codec       string `json:"codec"`
+	Channels    int    `json:"channels"`
+	SampleRate  int    `json:"sample_rate"`
+	BitDepth    int    `json:"bit_depth"`
+	CodecHeader string `json:"codec_header,omitempty"` // standard Base64 (e.g. fLaC+STREAMINFO for flac)
 }
 
 // StreamStart is the server→client stream/start message opening a stream.
@@ -62,11 +64,18 @@ type StreamStart struct {
 	Player            *StreamStartPlayer `json:"player,omitempty"`
 }
 
+// StreamClear instructs clients to clear their buffers for the given roles,
+// used for seeks and track jumps. from_timestamp, when present, keeps audio
+// strictly before that server-clock time and clears only at-or-after it.
+type StreamClear struct {
+	ServerTransmitted int64    `json:"server_transmitted"`
+	FromTimestamp     *int64   `json:"from_timestamp,omitempty"`
+	Roles             []string `json:"roles,omitempty"`
+}
+
 // StreamEnd is the server→client stream/end message closing active streams.
-// ServerTransmitted is the server-clock microsecond timestamp stamped at send;
 // Roles, when present, restricts the end to those role families (all if
 // omitted).
 type StreamEnd struct {
-	ServerTransmitted int64    `json:"server_transmitted"`
-	Roles             []string `json:"roles,omitempty"`
+	Roles []string `json:"roles,omitempty"`
 }

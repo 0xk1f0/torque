@@ -9,7 +9,7 @@ func TestCommandMessages_RoundTrip(t *testing.T) {
 	mute := true
 	for _, want := range []any{
 		&ClientCommand{Controller: &ControllerCommand{Command: CmdVolume, Volume: &vol}},
-		&ClientCommand{Controller: &ControllerCommand{Command: CmdSwitch, GroupID: "g1"}},
+		&ClientCommand{Controller: &ControllerCommand{Command: CmdSwitch}},
 		&ServerCommand{Player: &PlayerCommand{Command: PlayerCmdMute, Mute: &mute}},
 	} {
 		raw, err := Marshal(want)
@@ -47,8 +47,7 @@ func TestControllerCommand_Validate(t *testing.T) {
 		{"seek missing", ControllerCommand{Command: CmdSeek}, false},
 		{"seek_relative ok", ControllerCommand{Command: CmdSeekRelative, OffsetMs: &off}, true},
 		{"seek_relative missing", ControllerCommand{Command: CmdSeekRelative}, false},
-		{"switch ok", ControllerCommand{Command: CmdSwitch, GroupID: "g1"}, true},
-		{"switch no group ok", ControllerCommand{Command: CmdSwitch}, true},
+		{"switch ok", ControllerCommand{Command: CmdSwitch}, true},
 		{"stray volume on play", ControllerCommand{Command: CmdPlay, Volume: &vol}, false},
 		{"stray position on pause", ControllerCommand{Command: CmdPause, PositionMs: &pos}, false},
 		{"unknown command", ControllerCommand{Command: "frobnicate"}, false},

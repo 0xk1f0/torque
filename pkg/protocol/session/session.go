@@ -21,11 +21,13 @@ type ServerConfig struct {
 	// ChooseActiveRoles maps the client's hello to the roles to activate.
 	// Nil activates the first version of each offered role family. Ignored
 	// when 'pairing' is among the activities: pairing activates always carry
-	// empty active_roles, per spec.
+	// empty active_roles, per spec. Conformant servers MUST only activate
+	// roles they actually implement (see server.Server.Handle).
 	ChooseActiveRoles func(hello ClientHello) []string
-	// SelectedPairMethod names the pairing method for a pairing activation.
-	// Required exactly when 'pairing' is in InitialActivities.
-	SelectedPairMethod string
+	// Pairing declares the pairing method (and dynamic-code format) for a
+	// pairing activation. Required exactly when 'pairing' is in
+	// InitialActivities; absent otherwise.
+	Pairing *Pairing
 	// ChooseActivities, when non-nil, picks the activity set from the
 	// client's hello (e.g. to grant playback only when the client actually
 	// advertised unpaired access). It overrides InitialActivities. Pairing
@@ -72,10 +74,10 @@ func EstablishServer(conn *secure.Conn, cfg ServerConfig) (*ServerSession, error
 			pairing = true
 		}
 	}
-	if pairing == (cfg.SelectedPairMethod == "") {
-		return nil, fmt.Errorf("server bug: selected_pair_method required exactly when pairing is declared")
+	if pairing == (cfg.Pairing == nil) {
+		return nil, fmt.Errorf("server bug: pairing object required exactly when pairing is declared")
 	}
-	if cfg.SelectedPairMethod != "" && (cfg.SelectedPairMethod == PairMethodPairingPSK) != (cfg.PSKCategory == PSKPairing) {
+	if cfg.Pairing != nil && (cfg.Pairing.Method == PairMethodPairingPSK) != (cfg.PSKCategory == PSKPairing) {
 		return nil, fmt.Errorf("server bug: pairing_psk method must be selected iff the matched PSK is a Pairing PSK")
 	}
 
@@ -106,9 +108,9 @@ func EstablishServer(conn *secure.Conn, cfg ServerConfig) (*ServerSession, error
 	}
 
 	if err := writeMessage(conn, ServerActivate{
-		Activities:         activities,
-		ActiveRoles:        &roles,
-		SelectedPairMethod: cfg.SelectedPairMethod,
+		Activities:  activities,
+		ActiveRoles: &roles,
+		Pairing:     cfg.Pairing,
 	}); err != nil {
 		return nil, fmt.Errorf("send server/activate: %w", err)
 	}
@@ -141,8 +143,8 @@ func (s *ServerSession) Reactivate(activities []Activity, activeRoles *[]string)
 
 // ClientConfig configures the client side of session establishment.
 type ClientConfig struct {
-	// Hello is the client/hello to send; TrustLevel and UnpairedAccess must
-	// reflect the connection's actual state.
+	// Hello is the client/hello to send; UnpairedAccess must reflect the
+	// connection's actual state.
 	Hello ClientHello
 	// PSKCategory classifies the PSK this client matched in the handshake.
 	PSKCategory PSKCategory
@@ -200,9 +202,9 @@ func EstablishClient(conn *secure.Conn, cfg ClientConfig) (*ClientSession, error
 		return nil, fmt.Errorf("expected server/activate before other messages, got %T", msg)
 	}
 
-	var methods []string
-	for _, d := range cfg.Hello.SupportedPairMethods {
-		methods = append(methods, d.Method)
+	methods := make([]string, 0, len(cfg.Hello.SupportedPairMethods))
+	for method := range cfg.Hello.SupportedPairMethods {
+		methods = append(methods, method)
 	}
 	verdict := JudgeActivate(cfg.PSKCategory, *act, ClientAdmissionState{
 		UnpairedAccessEnabled: cfg.Hello.UnpairedAccess.Enabled,
@@ -255,8 +257,8 @@ func validateClientHello(h ClientHello) error {
 	if h.Name == "" {
 		return fmt.Errorf("client/hello requires a name")
 	}
-	if !h.TrustLevel.Valid() {
-		return fmt.Errorf("client/hello trust_level %q invalid", string(h.TrustLevel))
+	if len(h.SupportedRoles) == 0 {
+		return fmt.Errorf("client/hello requires supported_roles")
 	}
 	return nil
 }

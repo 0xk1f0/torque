@@ -74,9 +74,8 @@ func TestStreamGroup_EndToEnd(t *testing.T) {
 
 	// Make the player available with a 100 ms buffer so the whole short stream
 	// fits inside a single send-ahead window (all chunks burst on tick one).
-	avail := true
 	minBuf := 100
-	sendControl(t, conn, session.ClientState{Available: &avail, Player: &session.ClientPlayerState{MinBufferMs: &minBuf}})
+	sendControl(t, conn, session.ClientState{Available: true, Player: &session.ClientPlayerState{MinBufferMs: &minBuf}})
 	sendControl(t, conn, session.ClientTime{ClientTransmitted: 1})
 	if st := readControl(t, conn).(*session.ServerTime); st.ClientTransmitted != 1 {
 		t.Fatal("barrier failed")
@@ -113,7 +112,7 @@ func TestStreamGroup_EndToEnd(t *testing.T) {
 		if mt != playback.PlayerAudioMsgType {
 			t.Fatalf("chunk %d msg type = %d, want %d", i, mt, playback.PlayerAudioMsgType)
 		}
-		ts, pcm, err := playback.ParseAudioChunk(body)
+		ts, _, pcm, err := playback.ParseAudioChunk(body)
 		if err != nil {
 			t.Fatalf("chunk %d parse: %v", i, err)
 		}

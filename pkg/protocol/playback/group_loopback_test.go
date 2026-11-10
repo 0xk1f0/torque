@@ -81,7 +81,7 @@ func TestGroup_LoopbackStream(t *testing.T) {
 		if msgType != playback.PlayerAudioMsgType {
 			t.Fatalf("chunk %d type = %d, want %d", i, msgType, playback.PlayerAudioMsgType)
 		}
-		ts, audio, err := playback.ParseAudioChunk(body)
+		ts, _, audio, err := playback.ParseAudioChunk(body)
 		if err != nil {
 			t.Fatalf("chunk %d parse: %v", i, err)
 		}

@@ -38,14 +38,14 @@ func (c MediaCommand) Valid() bool {
 
 // ControllerCommand is the controller object of client/command. Only the field
 // matching the command is set (volume for volume, mute for mute, position_ms
-// for seek, offset_ms for seek_relative, group_id for switch).
+// for seek, offset_ms for seek_relative). Per the current spec `switch` takes
+// no parameters.
 type ControllerCommand struct {
 	Command    MediaCommand `json:"command"`
 	Volume     *int         `json:"volume,omitempty"`
 	Mute       *bool        `json:"mute,omitempty"`
 	PositionMs *int         `json:"position_ms,omitempty"`
 	OffsetMs   *int         `json:"offset_ms,omitempty"`
-	GroupID    string       `json:"group_id,omitempty"`
 }
 
 // Validate checks the command verb and that exactly the command's own
@@ -78,7 +78,7 @@ func (c ControllerCommand) Validate() error {
 			return fmt.Errorf("seek_relative command requires offset_ms")
 		}
 	case CmdSwitch:
-		// group_id is optional: an empty group_id means cycle/new solo group.
+		// switch cycles to the next group / previous group; no parameters.
 	}
 	// Reject parameters that do not belong to the command.
 	if c.Volume != nil && c.Command != CmdVolume {
@@ -108,21 +108,21 @@ type PlayerCmd string
 const (
 	PlayerCmdVolume         PlayerCmd = "volume"
 	PlayerCmdMute           PlayerCmd = "mute"
-	PlayerCmdSetStaticDelay PlayerCmd = "set_static_delay"
+	PlayerCmdSetOutputDelay PlayerCmd = "set_output_delay"
 )
 
 // Valid reports whether c is a spec-defined player command.
 func (c PlayerCmd) Valid() bool {
-	return c == PlayerCmdVolume || c == PlayerCmdMute || c == PlayerCmdSetStaticDelay
+	return c == PlayerCmdVolume || c == PlayerCmdMute || c == PlayerCmdSetOutputDelay
 }
 
 // PlayerCommand is the player object of server/command: a directive to one
-// player to change its volume, mute, or static delay.
+// player to change its volume, mute, or output delay.
 type PlayerCommand struct {
 	Command       PlayerCmd `json:"command"`
 	Volume        *int      `json:"volume,omitempty"`
 	Mute          *bool     `json:"mute,omitempty"`
-	StaticDelayMs *int      `json:"static_delay_ms,omitempty"`
+	OutputDelayMs *int      `json:"output_delay_ms,omitempty"`
 }
 
 // ServerCommand is the server→client server/command message.

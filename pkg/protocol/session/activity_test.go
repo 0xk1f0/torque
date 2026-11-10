@@ -14,28 +14,28 @@ func TestAllowedActivities_SpecTable(t *testing.T) {
 		unpaired bool
 		want     bool
 	}{
-		// Sendspin PSK (long-term): ['pairing'] or any subset of {playback, management}.
+		// Long-term PSK: [] or ['playback']; never pairing.
 		{"longterm empty", PSKLongTerm, acts(), false, true},
 		{"longterm playback", PSKLongTerm, acts(ActivityPlayback), false, true},
-		{"longterm management", PSKLongTerm, acts(ActivityManagement), false, true},
-		{"longterm playback+management", PSKLongTerm, acts(ActivityPlayback, ActivityManagement), false, true},
-		{"longterm pairing", PSKLongTerm, acts(ActivityPairing), false, true},
+		{"longterm pairing", PSKLongTerm, acts(ActivityPairing), false, false},
 		{"longterm pairing+playback", PSKLongTerm, acts(ActivityPairing, ActivityPlayback), false, false},
-		// Pairing PSK: only ['pairing'].
+		// Pairing PSK: [], ['pairing'], ['playback']¹, ['playback','pairing']¹.
+		{"pairingpsk empty", PSKPairing, acts(), false, true},
 		{"pairingpsk pairing", PSKPairing, acts(ActivityPairing), false, true},
-		{"pairingpsk empty", PSKPairing, acts(), false, false},
 		{"pairingpsk playback", PSKPairing, acts(ActivityPlayback), false, false},
-		{"pairingpsk pairing+management", PSKPairing, acts(ActivityPairing, ActivityManagement), false, false},
-		// Sentinel: [], ['pairing'], ['playback'] with unpaired access only.
+		{"pairingpsk playback unpaired-on", PSKPairing, acts(ActivityPlayback), true, true},
+		{"pairingpsk pairing+playback", PSKPairing, acts(ActivityPairing, ActivityPlayback), false, false},
+		{"pairingpsk pairing+playback unpaired-on", PSKPairing, acts(ActivityPairing, ActivityPlayback), true, true},
+		// Sentinel: same four as pairing PSK.
 		{"sentinel empty", PSKSentinel, acts(), false, true},
 		{"sentinel pairing", PSKSentinel, acts(ActivityPairing), false, true},
-		{"sentinel playback unpaired-on", PSKSentinel, acts(ActivityPlayback), true, true},
 		{"sentinel playback unpaired-off", PSKSentinel, acts(ActivityPlayback), false, false},
-		{"sentinel management", PSKSentinel, acts(ActivityManagement), true, false},
-		{"sentinel playback+management", PSKSentinel, acts(ActivityPlayback, ActivityManagement), true, false},
+		{"sentinel playback unpaired-on", PSKSentinel, acts(ActivityPlayback), true, true},
+		{"sentinel pairing+playback unpaired-on", PSKSentinel, acts(ActivityPairing, ActivityPlayback), true, true},
 		// Structural rules.
 		{"duplicate activity", PSKLongTerm, acts(ActivityPlayback, ActivityPlayback), false, false},
 		{"unknown activity", PSKLongTerm, []Activity{"streaming"}, false, false},
+		{"management is not a spec activity", PSKSentinel, []Activity{ActivityPlayback, "management"}, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,12 +48,16 @@ func TestAllowedActivities_SpecTable(t *testing.T) {
 }
 
 func TestPlaybackCapable(t *testing.T) {
-	// Long-term PSK with only management declared: extending with playback is
+	// Long-term PSK with no playback declared: extending with playback is
 	// allowed, so the connection may carry roles even without 'playback'.
-	if !PlaybackCapable(PSKLongTerm, acts(ActivityManagement), false) {
-		t.Error("long-term management connection should be playback-capable")
+	if !PlaybackCapable(PSKLongTerm, acts(), false) {
+		t.Error("long-term connection should be playback-capable")
 	}
-	// Pairing PSK is never playback-capable.
+	// Long-term with pairing declared is inadmissible, so not capable.
+	if PlaybackCapable(PSKLongTerm, acts(ActivityPairing), false) {
+		t.Error("long-term pairing-declared connection must not be playback-capable")
+	}
+	// Pairing PSK alone is not playback-capable.
 	if PlaybackCapable(PSKPairing, acts(ActivityPairing), false) {
 		t.Error("pairing-psk connection must not be playback-capable")
 	}
@@ -67,6 +71,8 @@ func TestPlaybackCapable(t *testing.T) {
 }
 
 func roles(r ...string) *[]string { s := append([]string{}, r...); return &s }
+
+func pairing(m PairingMethod) *Pairing { return &Pairing{Method: m} }
 
 func TestJudgeActivate_VerdictRules(t *testing.T) {
 	cases := []struct {
@@ -94,25 +100,17 @@ func TestJudgeActivate_VerdictRules(t *testing.T) {
 			goodbye: GoodbyePairingRequired,
 		},
 		{
-			// Rule 2: management on sentinel is never admissible.
-			name:    "sentinel management -> unauthorized",
-			psk:     PSKSentinel,
-			act:     ServerActivate{Activities: acts(ActivityManagement), ActiveRoles: roles()},
-			state:   ClientAdmissionState{UnpairedAccessEnabled: true},
-			goodbye: GoodbyeUnauthorized,
-		},
-		{
 			// Rule 2: roles on a non-playback-capable connection.
 			name:    "roles on pairing-psk connection -> unauthorized",
 			psk:     PSKPairing,
-			act:     ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles("player@v1"), SelectedPairMethod: "pairing_psk"},
+			act:     ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles("player@v1"), Pairing: pairing(PairMethodPairingPSK)},
 			state:   ClientAdmissionState{OfferedPairMethods: []string{"pairing_psk"}},
 			goodbye: GoodbyeUnauthorized,
 		},
 		{
 			name:   "pairing-psk pairing with matching method",
 			psk:    PSKPairing,
-			act:    ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), SelectedPairMethod: "pairing_psk"},
+			act:    ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), Pairing: pairing(PairMethodPairingPSK)},
 			state:  ClientAdmissionState{OfferedPairMethods: []string{"pairing_psk"}},
 			wantOK: true,
 		},
@@ -120,31 +118,46 @@ func TestJudgeActivate_VerdictRules(t *testing.T) {
 			// Rule 3: pairing_psk method on a non-pairing PSK.
 			name:  "sentinel pairing with pairing_psk method -> method_not_supported",
 			psk:   PSKSentinel,
-			act:   ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), SelectedPairMethod: "pairing_psk"},
-			state: ClientAdmissionState{OfferedPairMethods: []string{"pairing_psk", "static_pin"}},
+			act:   ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), Pairing: pairing(PairMethodPairingPSK)},
+			state: ClientAdmissionState{OfferedPairMethods: []string{"pairing_psk", "static_pairing_code"}},
 			abort: PairAbortMethodNotSupported,
 		},
 		{
 			// Rule 3: method the client did not offer.
 			name:  "pairing with unoffered method -> method_not_supported",
 			psk:   PSKSentinel,
-			act:   ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), SelectedPairMethod: "dynamic_pin"},
-			state: ClientAdmissionState{OfferedPairMethods: []string{"static_pin"}},
+			act:   ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), Pairing: pairing(PairMethodDynamicPairingCode)},
+			state: ClientAdmissionState{OfferedPairMethods: []string{"static_pairing_code"}},
 			abort: PairAbortMethodNotSupported,
 		},
 		{
-			// Rule 3: pairing without a selected method.
-			name:  "pairing without selected method -> method_not_supported",
+			// Rule 3: pairing without a pairing object.
+			name:  "pairing without pairing object -> method_not_supported",
 			psk:   PSKSentinel,
 			act:   ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles()},
-			state: ClientAdmissionState{OfferedPairMethods: []string{"static_pin"}},
+			state: ClientAdmissionState{OfferedPairMethods: []string{"static_pairing_code"}},
 			abort: PairAbortMethodNotSupported,
 		},
 		{
-			// selected_pair_method must be absent without 'pairing'.
-			name:    "method without pairing activity -> unauthorized",
+			// Rule 3: dynamic pairing code requires a format.
+			name:  "dynamic pairing code without format -> method_not_supported",
+			psk:   PSKSentinel,
+			act:   ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), Pairing: pairing(PairMethodDynamicPairingCode)},
+			state: ClientAdmissionState{OfferedPairMethods: []string{"dynamic_pairing_code"}},
+			abort: PairAbortMethodNotSupported,
+		},
+		{
+			name:   "dynamic pairing code with offered format",
+			psk:    PSKSentinel,
+			act:    ServerActivate{Activities: acts(ActivityPairing), ActiveRoles: roles(), Pairing: &Pairing{Method: PairMethodDynamicPairingCode, Format: pf(PairingFormatDigits)}},
+			state:  ClientAdmissionState{OfferedPairMethods: []string{"dynamic_pairing_code"}},
+			wantOK: true,
+		},
+		{
+			// pairing object must be absent without 'pairing'.
+			name:    "pairing object without pairing activity -> unauthorized",
 			psk:     PSKLongTerm,
-			act:     ServerActivate{Activities: acts(ActivityPlayback), ActiveRoles: roles(), SelectedPairMethod: "static_pin"},
+			act:     ServerActivate{Activities: acts(ActivityPlayback), ActiveRoles: roles(), Pairing: pairing(PairMethodStaticPairingCode)},
 			state:   ClientAdmissionState{},
 			goodbye: GoodbyeUnauthorized,
 		},
@@ -153,16 +166,9 @@ func TestJudgeActivate_VerdictRules(t *testing.T) {
 			// playback capability.
 			name:    "persisted roles on pairing psk -> unauthorized",
 			psk:     PSKPairing,
-			act:     ServerActivate{Activities: acts(ActivityPairing), SelectedPairMethod: "pairing_psk"},
+			act:     ServerActivate{Activities: acts(ActivityPairing), Pairing: pairing(PairMethodPairingPSK)},
 			state:   ClientAdmissionState{OfferedPairMethods: []string{"pairing_psk"}, ActiveRolesInEffect: []string{"player@v1"}},
 			goodbye: GoodbyeUnauthorized,
-		},
-		{
-			name:   "longterm management-only with roles (playback-capable)",
-			psk:    PSKLongTerm,
-			act:    ServerActivate{Activities: acts(ActivityManagement), ActiveRoles: roles("player@v1")},
-			state:  ClientAdmissionState{},
-			wantOK: true,
 		},
 	}
 	for _, tc := range cases {
@@ -175,3 +181,5 @@ func TestJudgeActivate_VerdictRules(t *testing.T) {
 		})
 	}
 }
+
+func pf(f PairingFormat) *PairingFormat { return &f }
