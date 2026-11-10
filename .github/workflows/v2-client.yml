@@ -46,6 +46,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Desktop x86_64 — native host gcc + host deps.
+          - name: linux-amd64
+            runner: ubuntu-latest
+            goarch: amd64
+            goarm: ""
+            cc: ""
+            pkgconfig: ""
+            cgo_cflags: ""
+            multiarch: "false"
           # 64-bit Pi OS — native arm64 runner, host gcc + host deps.
           - name: linux-arm64        # Pi 3 / Pi 4 / Pi 5 / Pi Zero 2 W (64-bit OS)
             runner: ubuntu-24.04-arm
@@ -85,8 +94,8 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Install dependencies (arm64 native)
-      if: matrix.goarch == 'arm64'
+    - name: Install dependencies (native)
+      if: matrix.goarch != 'arm'
       run: |
         sudo apt-get update
         sudo apt-get install -y libopus-dev libasound2-dev
