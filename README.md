@@ -132,8 +132,7 @@ make test
 make lint
 ```
 
-Protocol conformance is documented in `docs/SPEC_COMPLIANCE.md` and the
-current client status in `docs/SPEC-V2_STATE.md`.
+Protocol conformance is documented in `docs/SPEC_COMPLIANCE.md`.
 
 ## License
 

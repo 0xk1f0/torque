@@ -1,6 +1,10 @@
 # Sendspin Protocol Compliance Audit
 
-**Status:** Working document (validation snapshot)
+> This repository is now **client-only** (a sendspin-client fork). The audit
+> below is the conformance reference the client is built against; the "legacy
+> track" and the pre-fork spec-v2 branch it mentions no longer exist here.
+
+**Status:** Conformance reference
 **Author:** protocol & stability workstream
 **Spec baseline:** [`Sendspin/spec`](https://github.com/Sendspin/spec) @
 `c281aeb` (2026-11-09, "Define `group_id` as a 43-character base64url value (#340)")
