@@ -448,6 +448,11 @@ func (p *Player) consumeAudio(recv *Receiver) {
 				}
 			}
 
+		// Exit when this receiver dies rather than lingering on its (never
+		// closed on a drop) output channel. Required so a reconnect loop
+		// does not leak one consumeAudio goroutine per dropped connection.
+		case <-recv.Done():
+			return
 		case <-p.ctx.Done():
 			return
 		}

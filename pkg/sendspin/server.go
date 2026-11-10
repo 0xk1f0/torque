@@ -239,6 +239,15 @@ func (s *Server) Start() error {
 	s.isShutdown = true
 	s.shutdownMu.Unlock()
 
+	// Close every active client connection BEFORE httpServer.Shutdown so the
+	// shutdown isn't stalled by hijacked WebSocket connections (which
+	// http.Server does not track or close). This unblocks each connection's
+	// ReadMessage, letting handleConnection run its deferred removeClient and
+	// the clientWriter goroutines exit, so s.wg.Wait() below can complete.
+	// Clients observe the connection end and may reconnect (e.g. against a
+	// restarted server).
+	s.disconnectClients()
+
 	// Cancel in-flight client dials before stopping mDNS so they observe
 	// context cancellation ahead of the discovery channel closing.
 	if s.dialerCancel != nil {
@@ -274,6 +283,23 @@ func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopChan)
 	})
+}
+
+// disconnectClients closes the WebSocket connection of every connected client.
+// It is part of the shutdown path (see Start) so hijacked connections cannot
+// stall shutdown and clients observe the server going away. Safe to call
+// concurrently with handleConnection's per-connection teardown.
+func (s *Server) disconnectClients() {
+	s.clientsMu.RLock()
+	clientList := make([]*ServerClient, 0, len(s.clients))
+	for _, c := range s.clients {
+		clientList = append(clientList, c)
+	}
+	s.clientsMu.RUnlock()
+
+	for _, c := range clientList {
+		c.Disconnect()
+	}
 }
 
 // getClockMicros returns server uptime in microseconds (monotonic, not wall clock).

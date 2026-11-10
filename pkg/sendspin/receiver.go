@@ -5,12 +5,14 @@ package sendspin
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"sort"
 	"strings"
 	stdsync "sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Sendspin/sendspin-go/pkg/audio"
@@ -29,6 +31,31 @@ const (
 // metadataApplyTickInterval is the cadence at which metadataApplyLoop wakes
 // to drain pending updates whose server timestamp has elapsed.
 const metadataApplyTickInterval = 100 * time.Millisecond
+
+// Graceful-degradation sentinel errors delivered through ReceiverConfig.OnError.
+var (
+	// ErrSyncLost is reported when the clock-sync time filter has been unusable
+	// for longer than the configured sync-loss grace. Playback pauses until
+	// sync recovers: audio timestamps cannot be trusted while the
+	// server-client clock mapping is stale, and playing on a dying mapping
+	// would desynchronize multi-room output. Compare with errors.Is to
+	// detect the condition.
+	ErrSyncLost = errors.New("clock sync lost: playback paused")
+	// ErrSyncRecovered is reported when clock sync becomes usable again after a
+	// loss and playback resumes. Despite the name it is informational, not an
+	// error condition; OnError callers should treat it as a state signal.
+	ErrSyncRecovered = errors.New("clock sync recovered: playback resumed")
+	// ErrConnectionLost is reported when the WebSocket connection to the server
+	// drops (as opposed to a graceful Close). The receiver is being torn down;
+	// a Player with reconnect enabled will rebuild it.
+	ErrConnectionLost = errors.New("server connection lost")
+)
+
+// Defaults for clock-sync loss monitoring (see ReceiverConfig).
+const (
+	defaultSyncMonitorInterval = 500 * time.Millisecond
+	defaultSyncLossGrace       = 5 * time.Second
+)
 
 type ReceiverConfig struct {
 	ServerAddr     string
@@ -50,6 +77,15 @@ type ReceiverConfig struct {
 	OnStreamEnd    func()
 	OnError        func(error)
 	OnCommand      func(protocol.PlayerCommand)
+
+	// SyncMonitorInterval is how often the clock-sync loss monitor samples
+	// time-filter quality (default 500ms).
+	SyncMonitorInterval time.Duration
+
+	// SyncLossGrace is how long clock-sync quality must stay QualityLost,
+	// after an established sync baseline, before playback pauses as a
+	// graceful-degradation measure (default 5s).
+	SyncLossGrace time.Duration
 }
 
 type ReceiverStats struct {
@@ -79,6 +115,22 @@ type Receiver struct {
 	mergedMetadata  Metadata
 	pendingMetadata []*protocol.MetadataState
 	clockNow        func() int64
+
+	// syncLost gates playback on clock-sync quality (see watchClockSync).
+	// When true, pumpSchedulerOutput discards decoded buffers instead of
+	// forwarding them, because timestamps cannot be trusted until the time
+	// filter recovers.
+	syncLost atomic.Bool
+
+	// pumpWG tracks the pumpSchedulerOutput goroutines. Close waits on it
+	// (after cancelling the pump contexts) before closing r.output, so a
+	// pump can never send on a channel being closed.
+	pumpWG stdsync.WaitGroup
+
+	// closingStreams, guarded by streamMu, is set by Close so a concurrently
+	// running handleStreamStart cannot add a new pump after Close has begun
+	// waiting on pumpWG (see handleStreamStart).
+	closingStreams bool
 }
 
 func NewReceiver(config ReceiverConfig) (*Receiver, error) {
@@ -100,6 +152,12 @@ func NewReceiver(config ReceiverConfig) (*Receiver, error) {
 	}
 	if config.DeviceInfo.SoftwareVersion == "" {
 		config.DeviceInfo.SoftwareVersion = "1.3.0"
+	}
+	if config.SyncMonitorInterval <= 0 {
+		config.SyncMonitorInterval = defaultSyncMonitorInterval
+	}
+	if config.SyncLossGrace <= 0 {
+		config.SyncLossGrace = defaultSyncLossGrace
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -225,6 +283,7 @@ func (r *Receiver) Connect() error {
 
 	go r.watchConnection()
 	go r.clockSyncLoop()
+	go r.watchClockSync()
 	go r.handleStreamStart()
 	go r.handleStreamClear()
 	go r.handleStreamEnd()
@@ -287,7 +346,18 @@ func (r *Receiver) handleStreamStart() {
 			// Swap the stream-scoped state under the lock, capturing the
 			// previous scheduler/cancel so we can tear them down after
 			// releasing it (Stop/cancel must not run under streamMu).
+			//
+			// closingStreams is set under streamMu by Close before it waits on
+			// pumpWG, so a pump added here is guaranteed to be awaited
+			// (mutual exclusion between Add and Wait — see Close).
 			r.streamMu.Lock()
+			if r.closingStreams {
+				r.streamMu.Unlock()
+				newCancel()
+				newScheduler.Stop()
+				return
+			}
+			r.pumpWG.Add(1)
 			oldScheduler := r.scheduler
 			oldCancel := r.schedulerCancel
 			r.decoder = decoder
@@ -362,9 +432,18 @@ func (r *Receiver) handleAudioChunks() {
 }
 
 func (r *Receiver) pumpSchedulerOutput(ctx context.Context, sched *Scheduler) {
+	defer r.pumpWG.Done()
 	for {
 		select {
 		case buf := <-sched.Output():
+			if r.syncLost.Load() {
+				// Graceful degradation: while the time filter is unusable,
+				// buffer timestamps cannot be trusted. Discard rather than
+				// mis-play (which would drift multi-room output apart). The
+				// discard keeps the pipeline draining so nothing downstream
+				// blocks; on recovery the queue is cleared and re-buffered.
+				continue
+			}
 			select {
 			case r.output <- buf:
 			case <-ctx.Done():
@@ -374,6 +453,69 @@ func (r *Receiver) pumpSchedulerOutput(ctx context.Context, sched *Scheduler) {
 			return
 		}
 	}
+}
+
+// watchClockSync implements graceful degradation on clock-sync loss. Each tick
+// it samples the time-filter quality; once quality has been QualityLost for at
+// least syncLossGrace (and only after an established sync baseline — a fresh
+// receiver that has never synced is handled by the startup buffer, not this
+// path), playback is paused: the scheduler queue is cleared so stale-mapped
+// buffers cannot play on recovery, the syncLost gate goes up, and ErrSyncLost
+// is reported. When quality recovers, the gate comes down, the queue is
+// cleared once more to purge buffers scheduled with the stale mapping, and
+// ErrSyncRecovered is reported — playback resumes with fresh, trustworthy
+// timestamps.
+func (r *Receiver) watchClockSync() {
+	tick := r.config.SyncMonitorInterval
+	grace := r.config.SyncLossGrace
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+
+	paused := false
+	for {
+		select {
+		case <-ticker.C:
+			if r.clockSync.CheckQuality() != sync.QualityLost {
+				if paused {
+					paused = false
+					r.resumePlayback()
+				}
+				continue
+			}
+			if paused || !r.clockSync.Synced() {
+				continue
+			}
+			if r.clockSync.TimeSinceLastSync() >= grace {
+				paused = true
+				r.pausePlayback(grace)
+			}
+		case <-r.ctx.Done():
+			return
+		}
+	}
+}
+
+// pausePlayback drops the stale-mapped backlog, raises the playback gate, and
+// reports ErrSyncLost.
+func (r *Receiver) pausePlayback(grace time.Duration) {
+	if sched := r.currentScheduler(); sched != nil {
+		sched.Clear()
+	}
+	r.syncLost.Store(true)
+	log.Printf("Clock sync lost for %v (%v); pausing playback pending recovery",
+		grace, ErrSyncLost)
+	r.notifyError(ErrSyncLost)
+}
+
+// resumePlayback purges buffers scheduled under the stale map, lowers the
+// playback gate, and reports ErrSyncRecovered.
+func (r *Receiver) resumePlayback() {
+	if sched := r.currentScheduler(); sched != nil {
+		sched.Clear()
+	}
+	r.syncLost.Store(false)
+	log.Printf("Clock sync recovered; resuming playback")
+	r.notifyError(ErrSyncRecovered)
 }
 
 func (r *Receiver) handleStreamClear() {
@@ -603,10 +745,43 @@ func (r *Receiver) watchConnection() {
 	case <-r.client.Done():
 		log.Printf("Server connection lost, shutting down receiver")
 		r.connected = false
-		r.notifyError(fmt.Errorf("server connection lost"))
+		// Tear down the active stream (scheduler + decoder) so their
+		// goroutines do not outlive a dropped connection. Without this the
+		// scheduler's Run loop and any open decoder would leak per reconnect.
+		r.stopStream()
+		r.notifyError(ErrConnectionLost)
 		r.cancel()
 	case <-r.ctx.Done():
 		return
+	}
+}
+
+// stopStream stops the active scheduler and decoder and cancels the pump
+// context, without closing r.output (the output channel stays open so a
+// consumer waiting on it observes the receiver context cancelling instead of
+// a spurious close). Safe to call when no stream is active; also used by
+// Close. Must not run the Stop/cancel calls while holding streamMu, so the
+// references are captured first.
+func (r *Receiver) stopStream() {
+	r.streamMu.Lock()
+	scheduler := r.scheduler
+	decoder := r.decoder
+	pumpCancel := r.schedulerCancel
+	r.scheduler = nil
+	r.decoder = nil
+	r.schedulerCancel = nil
+	r.streamMu.Unlock()
+
+	if pumpCancel != nil {
+		pumpCancel()
+	}
+	if scheduler != nil {
+		scheduler.Stop()
+	}
+	if decoder != nil {
+		if err := decoder.Close(); err != nil {
+			log.Printf("Receiver: decoder close error: %v", err)
+		}
 	}
 }
 
@@ -767,25 +942,27 @@ func (r *Receiver) Close() error {
 		r.client.SendGoodbye("shutdown")
 	}
 
+	// Gate new stream starts before we begin waiting on pumpWG: a stream
+	// added after this point would otherwise race the Wait (see
+	// handleStreamStart). Must be set under streamMu to exclude the swap
+	// critical section.
+	r.streamMu.Lock()
+	r.closingStreams = true
+	r.streamMu.Unlock()
+
+	// Stop the current stream first so nothing can write to r.output once it
+	// is closed below.
+	r.stopStream()
+
 	r.cancel()
+	// Wait until every pumpSchedulerOutput goroutine has exited. Each pump's
+	// send-select also selects on its cancelled context, so this terminates
+	// promptly even when no consumer is draining r.output; waiting here makes
+	// close(r.output) below race-free w.r.t. in-flight sends.
+	r.pumpWG.Wait()
 
 	if r.client != nil {
 		r.client.Close()
-	}
-
-	r.streamMu.Lock()
-	scheduler := r.scheduler
-	decoder := r.decoder
-	r.streamMu.Unlock()
-
-	if scheduler != nil {
-		scheduler.Stop()
-	}
-
-	if decoder != nil {
-		if err := decoder.Close(); err != nil {
-			log.Printf("Receiver: decoder close error: %v", err)
-		}
 	}
 
 	close(r.output)

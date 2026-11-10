@@ -238,3 +238,21 @@ func (c *ServerClient) Close() {
 		close(c.done)
 	}
 }
+
+// Disconnect closes the underlying WebSocket connection, which unblocks a
+// concurrently-blocked ReadMessage in the serving goroutine. Used by the
+// server on shutdown so connected clients observe the connection end (and can
+// reconnect elsewhere) rather than hanging until the sawtooth read deadline.
+//
+// Safe to call when the caller in the serving goroutine also closes the
+// connection on return; gorilla's Conn.Close is safe for concurrent use and
+// idempotent. The writer goroutine observes the failure on its next write or
+// via a write deadline and exits.
+func (c *ServerClient) Disconnect() {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
