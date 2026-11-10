@@ -94,7 +94,7 @@ func (d *FLACDecoder) runDecoder(pr *io.PipeReader, codecHeader []byte) {
 				sample := frame.Subframes[ch].Samples[i]
 
 				// Convert to 24-bit int32 range (same logic as FLACSource
-				// in internal/server/audio_source.go)
+				// (the source that produced the stream)
 				var converted int32
 				if bitDepth == 16 {
 					converted = sample << 8

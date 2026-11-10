@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-11-10
+
+Forked and reworked as **client-only**.
+
+### Changed
+
+- Stripped every server component: `pkg/protocol/server`, the legacy engine
+  and TUI (`internal/server`, `internal/ui`), mDNS discovery, the legacy
+  player/servers in `pkg/sendspin`, and the server CLI.
+- The product is the encrypted spec-v2 client: `ReceiverV2`/`PlayerV2`
+  (`pkg/sendspin`), the Noise transport (`pkg/protocol/secure`), the client
+  session and pairing (`pkg/protocol/session`), and the Kalman clock filter
+  (`pkg/sync`).
+- Single CLI: `cmd/sendspin-client`; multi-architecture CI via
+  `v2-client.yml` and `Dockerfile` (amd64/arm64/armv7/armv6).
+- Build on Go 1.27; module dependency set reduced (no TUI, discovery, mp3,
+  or YAML dependencies).
+
+Entries below this line are from the pre-fork history and describe the
+original sendspin-go repository, including server components no longer
+present.
+
 ## [0.9.0] - 2025-10-25
 
 ### Added

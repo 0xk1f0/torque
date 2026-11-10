@@ -1,46 +1,56 @@
-# ABOUTME: Build automation for Sendspin Protocol server and player
-# ABOUTME: Provides targets for building, testing, and cleaning binaries
+# ABOUTME: Build automation for the Sendspin client
+# ABOUTME: Provides targets for building, testing, and installing the client
 
-.PHONY: all build player server test test-verbose test-coverage lint clean install \
-	build-all build-linux build-darwin help conformance \
-	install-daemon uninstall-daemon \
-	install-player-daemon uninstall-player-daemon \
-	install-server-daemon uninstall-server-daemon
+.PHONY: all build build-cross test test-verbose test-coverage lint clean install help
 
 # Version from git tag or default
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -X github.com/Sendspin/sendspin-go/internal/version.Version=$(VERSION)
 
 # Build with -tags=nolibopusfile so gopkg.in/hraban/opus.v2 doesn't link
-# libopusfile. Our code never calls the opus.Stream API (the only consumer
-# of the opusfile parts), so the linkage was free runtime-dependency weight.
-# Override on the command line if you actually need opusfile (e.g. for
-# upstream stream_test.go): make BUILDTAGS= test
+# libopusfile at runtime. The client never uses the opus.Stream API.
 BUILDTAGS ?= nolibopusfile
 export GOFLAGS = -tags=$(BUILDTAGS)
 
 # Default target
 all: build
 
-# Build both player and server
-build: player server
+# Build the client for the host platform
+build:
+	@echo "Building sendspin-client..."
+	go build -ldflags "$(LDFLAGS)" -o sendspin-client ./cmd/sendspin-client
 
-# Build the player
-player:
-	@echo "Building sendspin-player..."
-	go build -ldflags "$(LDFLAGS)" -o sendspin-player .
-
-# Build the server
-server:
-	@echo "Building sendspin-server..."
-	go build -ldflags "$(LDFLAGS)" -o sendspin-server ./cmd/sendspin-server
+# Cross-build for Linux on every Raspberry Pi architecture + x86_64 (the same
+# matrix as .github/workflows/v2-client.yml). Optional; Docker is the
+# canonical way (see Dockerfile).
+build-cross:
+	@mkdir -p bin
+	@for target in "amd64:" "arm64:" "arm:7" "arm:6"; do \
+		arch="$${target%%:*}"; arm="$${target##*:}"; \
+		case "$$arch" in \
+		arm) cc="arm-linux-gnueabihf-gcc"; flags="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"; \
+		     [ "$$arm" = "6" ] && flags="-march=armv6 -mfpu=vfp -mfloat-abi=hard"; \
+		     out="sendspin-client-linux-arm$$arm"; \
+		     echo "  $$out ($$flags)"; \
+		     GOOS=linux GOARCH=arm GOARM=$$arm CC=$$cc \
+		       CGO_CFLAGS="$$flags" CGO_LDFLAGS="$$flags" \
+		       PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig \
+		       go build -ldflags "$(LDFLAGS)" -o bin/$$out ./cmd/sendspin-client ;; \
+		arm64) echo "  sendspin-client-linux-arm64"; \
+		       GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+		       PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+		       go build -ldflags "$(LDFLAGS)" -o bin/sendspin-client-linux-arm64 ./cmd/sendspin-client ;; \
+		*) echo "  sendspin-client-linux-amd64"; \
+		   GOOS=linux GOARCH=amd64 \
+		     go build -ldflags "$(LDFLAGS)" -o bin/sendspin-client-linux-amd64 ./cmd/sendspin-client ;; \
+		esac; \
+	done
 
 # Run tests
 test:
 	@echo "Running tests..."
 	go test ./...
 
-# Run tests with verbose output
 test-verbose:
 	@echo "Running tests (verbose)..."
 	go test -v ./...
@@ -61,167 +71,57 @@ lint:
 # Clean built binaries and artifacts
 clean:
 	@echo "Cleaning binaries and artifacts..."
-	rm -f sendspin-player sendspin-server resonate-player resonate-server
+	rm -f sendspin-client
 	rm -rf bin/
 	rm -f coverage.out coverage.html
 
-# Install both binaries to GOPATH/bin
+# Install the client to GOPATH/bin
 install:
-	@echo "Installing binaries..."
-	go install -ldflags "$(LDFLAGS)" .
-	go install -ldflags "$(LDFLAGS)" ./cmd/sendspin-server
+	@echo "Installing sendspin-client..."
+	go install -ldflags "$(LDFLAGS)" ./cmd/sendspin-client
 
-# Build all platforms (like CI)
-build-all: build-linux build-darwin
-
-# Build Linux binaries
-build-linux:
-	@echo "Building Linux binaries..."
-	@mkdir -p bin
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-player-linux-amd64 .
-	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-player-linux-arm64 .
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-server-linux-amd64 ./cmd/sendspin-server
-	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-server-linux-arm64 ./cmd/sendspin-server
-
-# Build macOS binaries
-build-darwin:
-	@echo "Building macOS binaries..."
-	@mkdir -p bin
-	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-player-darwin-amd64 .
-	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-player-darwin-arm64 .
-	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-server-darwin-amd64 ./cmd/sendspin-server
-	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/sendspin-server-darwin-arm64 ./cmd/sendspin-server
-
-# Install sendspin-player as a systemd daemon
-install-player-daemon: player
-	@echo "Installing sendspin-player daemon..."
-	install -m 755 sendspin-player /usr/local/bin/sendspin-player
-	install -m 644 dist/systemd/sendspin-player.service /etc/systemd/system/sendspin-player.service
-	@if [ ! -f /etc/default/sendspin-player ]; then \
-		install -m 644 dist/systemd/sendspin-player.env /etc/default/sendspin-player; \
-		echo "Created /etc/default/sendspin-player — edit this file to configure."; \
+# Install sendspin-client as a systemd service (Linux, requires root)
+install-daemon: build
+	@echo "Installing sendspin-client service..."
+	install -m 755 sendspin-client /usr/local/bin/sendspin-client
+	install -m 644 dist/systemd/sendspin-client.service /etc/systemd/system/sendspin-client.service
+	@if [ ! -f /etc/default/sendspin-client ]; then \
+		install -m 644 dist/systemd/sendspin-client.env /etc/default/sendspin-client; \
+		echo "Created /etc/default/sendspin-client — edit this file to configure."; \
 	else \
-		echo "/etc/default/sendspin-player already exists, not overwriting."; \
-	fi
-	@if [ ! -f /etc/sendspin/player.yaml ]; then \
-		install -d -m 755 /etc/sendspin; \
-		install -m 644 dist/config/player.example.yaml /etc/sendspin/player.yaml; \
-		echo "Created /etc/sendspin/player.yaml — edit this file to configure."; \
-	else \
-		echo "/etc/sendspin/player.yaml already exists, not overwriting."; \
+		echo "/etc/default/sendspin-client already exists, not overwriting."; \
 	fi
 	systemctl daemon-reload
 	@echo ""
 	@echo "Installed. To start:"
-	@echo "  sudo systemctl enable --now sendspin-player"
+	@echo "  sudo systemctl enable --now sendspin-client"
 	@echo ""
-	@echo "Configure via /etc/sendspin/player.yaml (preferred) or /etc/default/sendspin-player"
+	@echo "Configure via /etc/default/sendspin-client"
 
-# Install sendspin-server as a systemd daemon
-install-server-daemon: server
-	@echo "Installing sendspin-server daemon..."
-	install -m 755 sendspin-server /usr/local/bin/sendspin-server
-	install -m 644 dist/systemd/sendspin-server.service /etc/systemd/system/sendspin-server.service
-	@if [ ! -f /etc/default/sendspin-server ]; then \
-		install -m 644 dist/systemd/sendspin-server.env /etc/default/sendspin-server; \
-		echo "Created /etc/default/sendspin-server — edit this file to configure."; \
-	else \
-		echo "/etc/default/sendspin-server already exists, not overwriting."; \
-	fi
-	@if [ ! -f /etc/sendspin/server.yaml ]; then \
-		install -d -m 755 /etc/sendspin; \
-		install -m 644 dist/config/server.example.yaml /etc/sendspin/server.yaml; \
-		echo "Created /etc/sendspin/server.yaml — edit this file to configure."; \
-	else \
-		echo "/etc/sendspin/server.yaml already exists, not overwriting."; \
-	fi
+# Remove the sendspin-client systemd service
+uninstall-daemon:
+	@echo "Removing sendspin-client service..."
+	-systemctl stop sendspin-client 2>/dev/null
+	-systemctl disable sendspin-client 2>/dev/null
+	rm -f /etc/systemd/system/sendspin-client.service
+	rm -f /usr/local/bin/sendspin-client
 	systemctl daemon-reload
-	@echo ""
-	@echo "Installed. To start:"
-	@echo "  sudo systemctl enable --now sendspin-server"
-	@echo ""
-	@echo "Configure via /etc/sendspin/server.yaml (preferred) or /etc/default/sendspin-server"
+	@echo "Removed. /etc/default/sendspin-client left in place (manual cleanup if desired)."
 
-# Aggregate: install both binaries as systemd daemons
-install-daemon: install-player-daemon install-server-daemon
-
-# Uninstall the sendspin-player systemd daemon
-uninstall-player-daemon:
-	@echo "Removing sendspin-player daemon..."
-	-systemctl stop sendspin-player 2>/dev/null
-	-systemctl disable sendspin-player 2>/dev/null
-	rm -f /etc/systemd/system/sendspin-player.service
-	rm -f /usr/local/bin/sendspin-player
-	systemctl daemon-reload
-	@echo "Removed. /etc/default/sendspin-player and /etc/sendspin/player.yaml left in place (manual cleanup if desired)."
-
-# Uninstall the sendspin-server systemd daemon
-uninstall-server-daemon:
-	@echo "Removing sendspin-server daemon..."
-	-systemctl stop sendspin-server 2>/dev/null
-	-systemctl disable sendspin-server 2>/dev/null
-	rm -f /etc/systemd/system/sendspin-server.service
-	rm -f /usr/local/bin/sendspin-server
-	systemctl daemon-reload
-	@echo "Removed. /etc/default/sendspin-server and /etc/sendspin/server.yaml left in place (manual cleanup if desired)."
-
-# Aggregate: uninstall both daemons
-uninstall-daemon: uninstall-player-daemon uninstall-server-daemon
-
-# Conformance test suite — runs the Sendspin protocol conformance harness
-# against the local sendspin-go checkout. Mirrors what CI does so contributors
-# and conformance maintainers can reproduce CI results locally.
-#
-# Assumes the conformance repo is checked out at ../conformance. Clones it
-# (and the aiosendspin reference peer) on first run. The CONFORMANCE_REPO_SENDSPIN_GO
-# env var points the harness at this checkout instead of the managed clone.
-conformance:
-	@command -v uv >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
-	@command -v git >/dev/null 2>&1 || { echo "git is required"; exit 1; }
-	@if [ ! -d ../conformance ]; then \
-		echo "Cloning Sendspin/conformance into ../conformance..."; \
-		git clone --depth 1 https://github.com/Sendspin/conformance.git ../conformance; \
-	fi
-	@mkdir -p ../conformance/repos
-	@if [ ! -e ../conformance/repos/aiosendspin ]; then \
-		echo "Cloning aiosendspin reference peer..."; \
-		git clone --depth 1 https://github.com/Sendspin/aiosendspin.git ../conformance/repos/aiosendspin; \
-	fi
-	@if [ ! -e ../conformance/repos/sendspin-cli ]; then \
-		echo "Cloning sendspin-cli (supplies the FLAC test fixture)..."; \
-		git clone --depth 1 https://github.com/Sendspin/sendspin-cli.git ../conformance/repos/sendspin-cli; \
-	fi
-	@cd ../conformance && uv sync
-	@cd ../conformance && CONFORMANCE_REPO_SENDSPIN_GO="$(CURDIR)" uv run python scripts/run_all.py \
-		--from sendspin-go \
-		--to aiosendspin,sendspin-go \
-		--results-dir results/
-	@echo ""
-	@echo "Conformance report: $(CURDIR)/../conformance/results/index.html"
-	@echo "Raw results:        $(CURDIR)/../conformance/results/data/"
-
-# Show help
 help:
-	@echo "Sendspin Protocol - Build Targets"
+	@echo "Sendspin Client - Build Targets"
 	@echo ""
-	@echo "  make              - Build player and server"
-	@echo "  make player       - Build sendspin-player"
-	@echo "  make server       - Build sendspin-server"
+	@echo "  make              - Build sendspin-client"
+	@echo "  make build-cross  - Cross-build for amd64/arm64/armv7/armv6 (needs cross toolchains)"
 	@echo "  make test         - Run tests"
 	@echo "  make test-verbose - Run tests with verbose output"
 	@echo "  make test-coverage- Run tests with coverage report"
 	@echo "  make lint         - Run golangci-lint"
 	@echo "  make clean        - Remove built binaries"
 	@echo "  make install      - Install to GOPATH/bin"
-	@echo "  make build-all    - Build all platforms"
-	@echo "  make build-linux  - Build Linux binaries"
-	@echo "  make build-darwin - Build macOS binaries"
-	@echo "  make install-daemon           - Install both player and server as systemd daemons (Linux, requires root)"
-	@echo "  make install-player-daemon    - Install only the player daemon"
-	@echo "  make install-server-daemon    - Install only the server daemon"
-	@echo "  make uninstall-daemon         - Remove both daemons"
-	@echo "  make uninstall-player-daemon  - Remove only the player daemon"
-	@echo "  make uninstall-server-daemon  - Remove only the server daemon"
-	@echo "  make conformance  - Run protocol conformance suite (clones ../conformance on first run)"
+	@echo "  make install-daemon   - Install as a systemd service (Linux, requires root)"
+	@echo "  make uninstall-daemon - Remove the systemd service"
+	@echo ""
+	@echo "Docker (multi-arch): docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6 --target export --output type=local,dest=dist ."
 	@echo ""
 	@echo "Version: $(VERSION)"

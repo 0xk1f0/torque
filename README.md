@@ -1,653 +1,140 @@
-> [!CAUTION]
-> **This library is currently unmaintained.** If you want to maintain it, please reach out here or on Discord.
+# Sendspin Client
 
+A Go implementation of the [Sendspin Protocol](https://github.com/Sendspin/spec)
+**client** — a Noise-encrypted player that connects to a Sendspin server and
+plays synchronized audio. This is a client-only fork of
+`Sendspin/sendspin-go`: every server component (the v2 server, the legacy
+engine/TUI, discovery, and the legacy player) has been stripped.
 
-# Sendspin Go
+**Highlights:**
 
-A complete Sendspin Protocol implementation in Go, featuring both server and player components for synchronized multi-room audio streaming.
+- **Encrypted by default** — Noise `KKpsk2` transport, so traffic is
+  authenticated and confidential end-to-end over plain `ws://`.
+- **Spec-conformant session** — role negotiation, `server/activate`
+  admissibility, `available`-based streaming, metadata, and control commands
+  audited against the current spec (`docs/SPEC_COMPLIANCE.md`).
+- **Hi-res audio** — 24-bit PCM/FLAC and Opus decoding, precise microsecond
+  clock sync via a Kalman time filter.
+- **Library-first** — use `PlayerV2` for out-of-the-box playback, `ReceiverV2`
+  for visualizers/DSP/custom outputs, or the lower-level
+  `pkg/protocol/*` and `pkg/sync` APIs.
+- **Resilient** — clock-sync-loss pause/resume and automatic reconnect with
+  jittered backoff.
+- **Small** — the client module drops the TUI, server engine, and discovery
+  dependencies; builds are ~8 MB stripped.
 
-**Key Highlights:**
+## Requirements
 
-- **Library-first design**: Use as a Go library or standalone CLI tools
-- **Hi-res audio support**: Up to 192kHz/24-bit streaming
-- **Multi-codec**: Opus, FLAC, MP3, PCM
-- **Precise synchronization**: Microsecond-level multi-room sync
-- **Easy to use**: Simple high-level APIs for common use cases
-- **Flexible**: Low-level component APIs for custom implementations
-- ~44mb of memory usage in Windows for sendspin-player
-
-## Using as a Library
-
-Install the library:
-
-```bash
-go get github.com/Sendspin/sendspin-go
-```
-
-### Quick Start - Player
-
-```go
-package main
-
-import (
-    "log"
-    "github.com/Sendspin/sendspin-go/pkg/sendspin"
-)
-
-func main() {
-    // Create and configure player
-    player, err := sendspin.NewPlayer(sendspin.PlayerConfig{
-        ServerAddr: "localhost:8927",
-        PlayerName: "Living Room",
-        Volume:     80,
-        OnMetadata: func(meta sendspin.Metadata) {
-            log.Printf("Playing: %s - %s", meta.Artist, meta.Title)
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Connect and play
-    if err := player.Connect(); err != nil {
-        log.Fatal(err)
-    }
-    if err := player.Play(); err != nil {
-        log.Fatal(err)
-    }
-
-    // Keep running
-    select {}
-}
-```
-
-### Quick Start - Server
-
-```go
-package main
-
-import (
-    "log"
-    "github.com/Sendspin/sendspin-go/pkg/sendspin"
-)
-
-func main() {
-    // Create test tone source (or use NewFileSource)
-    source := sendspin.NewTestTone(192000, 2)
-
-    // Create and start server
-    server, err := sendspin.NewServer(sendspin.ServerConfig{
-        Port:   8927,
-        Name:   "My Server",
-        Source: source,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    if err := server.Start(); err != nil {
-        log.Fatal(err)
-    }
-
-    // Keep running
-    select {}
-}
-```
-
-### More Examples
-
-See the [examples/](examples/) directory for more complete examples:
-
-- **[basic-player/](examples/basic-player/)** - Simple player with status monitoring
-- **[basic-server/](examples/basic-server/)** - Simple server with test tone
-- **[custom-source/](examples/custom-source/)** - Custom audio source implementation
-
-### API Documentation
-
-- **High-level API**: `pkg/sendspin` - Player and Server with simple configuration
-- **Audio processing**: `pkg/audio` - Format types, codecs, resampling, output
-- **Protocol**: `pkg/protocol` - WebSocket client and message types
-- **Clock sync**: `pkg/sync` - Precise timing synchronization
-
-Full API documentation: https://pkg.go.dev/github.com/Sendspin/sendspin-go
-
-## Features
-
-### Server
-
-- Stream audio from multiple sources:
-    - Local files (MP3, FLAC)
-    - HTTP/HTTPS streams (direct MP3)
-    - HLS streams (.m3u8 live radio)
-    - Test tone generator (440Hz)
-- Automatic resampling to 48kHz for Opus compatibility
-- Multi-codec support (Opus @ 256kbps, PCM fallback)
-- mDNS service advertisement for automatic discovery
-- Real-time terminal UI showing connected clients
-- WebSocket-based streaming with precise timestamps
-
-### Player
-
-- Automatic server discovery via mDNS
-- Multi-codec support (Opus, FLAC, PCM)
-- Precise clock synchronization for multi-room audio
-- Interactive terminal UI with volume control
-- Jitter buffer for smooth playback
-
-## Quickstart on Raspberry Pi
-
-For a 64-bit Raspberry Pi OS (Lite is recommended; Bookworm or newer required):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Sendspin/sendspin-go/main/scripts/quickstart-pi.sh | sudo bash
-```
-
-The script installs runtime dependencies, downloads the latest `sendspin-player-linux-arm64` release tarball, and registers the player as a systemd service. Add flags after `--` to pre-configure the player without editing files afterwards:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Sendspin/sendspin-go/main/scripts/quickstart-pi.sh \
-  | sudo bash -s -- --name "Living Room" --device "USB Audio Device"
-```
-
-Pin to a specific release with `--version v1.6.2`. Remove the player with `--uninstall` (config in `/etc/sendspin/` is preserved). Supported on Pi 3 / 4 / 5 / Zero 2 W; not supported on 32-bit-only hardware (Pi 1 / Zero v1 / Zero W).
-
-After install:
-
-- View live logs: `journalctl -u sendspin-player -f`
-- Discover device names: `sendspin-player --list-audio-devices`
-- Edit config: `sudo nano /etc/sendspin/player.yaml`
-
-## Installation
-
-### Prerequisites
-
-You'll need `pkg-config`, the Opus library, and optionally `ffmpeg` for HLS streaming:
+- Go ≥ 1.27
+- `pkg-config` + libopus (`libopus-dev`; `libopus0` at runtime)
+- ALSA dev headers on Linux (`libasound2-dev`)
 
 ```bash
 # macOS
-brew install pkg-config opus ffmpeg
-
+brew install pkg-config opus
 # Ubuntu/Debian
-sudo apt-get install pkg-config libopus-dev ffmpeg
-
-# Fedora
-sudo dnf install pkg-config opus-devel ffmpeg
+sudo apt-get install pkg-config libopus-dev libasound2-dev
 ```
 
-**Windows (MSYS2):**
-
-Install MSYS2 from https://www.msys2.org/, then in a **MSYS2 MinGW 64-bit** shell:
+## Build
 
 ```bash
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-pkg-config \
-          mingw-w64-x86_64-opus
+make            # builds ./sendspin-client
+make test       # go test ./...
+make lint       # golangci-lint
 ```
 
-All subsequent `go build`, `go test`, and `make` commands must be run from a shell with the MSYS2 MinGW 64-bit toolchain on PATH:
+Cross-build every Raspberry Pi architecture (plus x86_64):
 
 ```bash
-export PATH="/c/msys64/mingw64/bin:$PATH"
+docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6 \
+    --target export --output type=local,dest=dist .
+# or natively: make build-cross   (needs aarch64/gnueabihf cross toolchains)
 ```
 
-**Notes:**
-
-- `ffmpeg` is only required for HLS/m3u8 stream support. Local files and direct HTTP MP3 streams work without it.
-- The Makefile sets `GOFLAGS=-tags=nolibopusfile`, which skips the `opus.Stream` parts of `gopkg.in/hraban/opus.v2` and avoids linking `libopusfile`. If you build with raw `go build` instead of `make`, either install `libopusfile-dev` / `opusfile` as well, or export `GOFLAGS=-tags=nolibopusfile` in your shell.
-
-### Build
-
-Build both server and player:
-
-```bash
-make
-```
-
-Or build individually:
-
-```bash
-make server  # Builds sendspin-server
-make player  # Builds sendspin-player
-```
-
-On Windows, both binaries are produced in the repo root as `sendspin-server.exe` and `sendspin-player.exe`. Run them from the same MSYS2 MinGW 64-bit shell (or from cmd/PowerShell once the MSYS2 runtime DLLs are on PATH).
+CI builds the same matrix in `.github/workflows/v2-client.yml`.
 
 ## Usage
 
-### Server
+```bash
+./sendspin-client -server 192.168.1.10:8927 --name "Living Room"
+```
 
-Start a server with the interactive TUI (default, plays 440Hz test tone):
+Options:
+
+| Flag | Description |
+|---|---|
+| `--server` | Server address, `host:port` (required) |
+| `--name` | Friendly name (default: `hostname-sendspin-client`) |
+| `--identity` | Path to the client identity key (generated on first run, mode 0600) |
+| `--buffer-ms` | Playback buffer in milliseconds (default 500) |
+| `--output-delay-ms` | `output_delay_ms` reported to the server (0–5000) |
+| `--buffer-capacity` | `buffer_capacity` in bytes advertised to the server |
+| `--max-sample-rate` / `--max-bit-depth` | Cap the advertised formats (0 = no cap) |
+| `--unpaired-access` | Admit unpaired servers (default true) |
+| `--version` | Print version and exit |
+
+Run as a systemd service on a Raspberry Pi:
 
 ```bash
-./sendspin-server
+sudo make install-daemon
+sudo systemctl enable --now sendspin-client
+# configure via /etc/default/sendspin-client
 ```
 
-Stream a local audio file:
+Or use `scripts/quickstart-pi.sh` for a one-shot install.
 
-```bash
-./sendspin-server --audio /path/to/music.mp3
-./sendspin-server --audio /path/to/album.flac
+## Library
+
+### PlayerV2 — play audio
+
+```go
+id, _ := secure.LoadOrGenerateIdentity("/home/pi/.config/sendspin/identity")
+
+player, _ := sendspin.NewPlayerV2(sendspin.V2Config{
+    ServerAddr: "192.168.1.10:8927",
+    Identity:   id,
+    Name:       "Living Room",
+    Volume:     80,
+    OnMetadata: func(m sendspin.Metadata) {
+        log.Printf("Now playing: %s - %s", m.Artist, m.Title)
+    },
+    OnError: func(err error) { log.Printf("client error: %v", err) },
+})
+
+player.Connect()
 ```
 
-Stream from HTTP/HTTPS:
+### ReceiverV2 — get raw decoded audio
 
-```bash
-./sendspin-server --audio http://example.com/stream.mp3
-```
+`ReceiverV2` does connect → handshake → session → clock sync → stream
+lifecycle → decode → schedule, and emits `audio.Buffer` on `Output()`. Use it
+for visualizers, DSP, or a custom output backend.
 
-Stream HLS/m3u8 (live radio):
+## Examples
 
-```bash
-./sendspin-server --audio "https://stream.radiofrance.fr/fip/fip.m3u8?id=radiofrance"
-```
-
-Run without TUI (streaming logs to stdout):
-
-```bash
-./sendspin-server --no-tui
-```
-
-#### Server Options
-
-- `--port` - WebSocket server port (default: 8927)
-- `--name` - Server friendly name (default: hostname-sendspin-server)
-- `--audio` - Audio source to stream:
-    - Local file path: `/path/to/music.mp3`, `/path/to/audio.flac`
-    - HTTP stream: `http://example.com/stream.mp3`
-    - HLS stream: `https://example.com/live.m3u8`
-    - If not specified, plays 440Hz test tone
-- `--log-file` - Log file path (default: sendspin-server.log)
-- `--debug` - Enable debug logging
-- `--no-mdns` - Disable mDNS advertisement (clients must connect manually)
-- `--no-tui` - Disable TUI, use streaming logs instead
-- `--daemon` - Daemon mode: log to stdout only (journalctl-friendly), no TUI, no log file. Recommended under systemd.
-- `--config` - Path to `server.yaml` config file. Default search: `$SENDSPIN_SERVER_CONFIG`, `~/.config/sendspin/server.yaml`, `/etc/sendspin/server.yaml`.
-
-#### Server TUI
-
-The server TUI shows:
-
-- Server name and port
-- Uptime
-- Currently playing audio
-- Connected clients with codec and state
-- Press `q` or `Ctrl+C` to quit
-
-#### Configuration File (`server.yaml`)
-
-Every CLI flag has a matching key in `server.yaml`. Keys use `snake_case` (`--no-mdns` ↔ `no_mdns`).
-
-A fully-commented starter file lives at [`dist/config/server.example.yaml`](dist/config/server.example.yaml) — copy it to `~/.config/sendspin/server.yaml` (user install) or `/etc/sendspin/server.yaml` (daemon) and uncomment the keys you want to set.
-
-**Search order** (first existing file wins; missing is not an error):
-
-1. `--config <path>` flag
-2. `$SENDSPIN_SERVER_CONFIG`
-3. `~/.config/sendspin/server.yaml` (macOS: `~/Library/Application Support/sendspin/server.yaml`; Windows: `%AppData%\sendspin\server.yaml`)
-4. `/etc/sendspin/server.yaml` (daemon/system-wide)
-
-**Value precedence**, for every flag: CLI > `SENDSPIN_SERVER_<UPPER_SNAKE>` env > `server.yaml` > built-in default.
-
-#### Running under systemd
-
-`make install-daemon` installs both `sendspin-player` and `sendspin-server` as systemd units. To install only one side:
-
-```bash
-sudo make install-server-daemon   # server only
-sudo make install-player-daemon   # player only
-```
-
-Then enable and start the server:
-
-```bash
-sudo systemctl enable --now sendspin-server
-journalctl -u sendspin-server -f
-```
-
-Configure via `/etc/sendspin/server.yaml` (preferred) or `SENDSPIN_SERVER_OPTS` in `/etc/default/sendspin-server`.
-
-### Player
-
-Start a player (auto-discovers servers via mDNS):
-
-```bash
-./sendspin-player --name "Living Room"
-```
-
-Connect to a specific server manually:
-
-```bash
-./sendspin-player --server ws://192.168.1.100:8927 --name "Kitchen"
-```
-
-#### Player Options
-
-- `--config` - Path to player.yaml config file. Default search: `$SENDSPIN_PLAYER_CONFIG`, `~/.config/sendspin/player.yaml`, `/etc/sendspin/player.yaml`.
-- `--server` - Manual server WebSocket address (skips mDNS discovery)
-- `--port` - Port for mDNS advertisement (default: 8927)
-- `--name` - Player friendly name (default: hostname-sendspin-player)
-- `--buffer-ms` - Jitter buffer size in milliseconds (default: 150)
-- `--log-file` - Log file path (default: sendspin-player.log)
-- `--client-id` - Override the persisted `client_id`. When set, the value is written to the config file and reused on subsequent launches.
-- `--audio-device` - Playback device name (see `--list-audio-devices`). Empty = miniaudio default.
-- `--list-audio-devices` - Print every playback device miniaudio can see and exit.
-- `--debug` - Enable debug logging
-
-#### Configuration File (`player.yaml`)
-
-Every CLI flag has a matching key in `player.yaml`. Keys use `snake_case` (`--buffer-ms` ↔ `buffer_ms`).
-
-A fully-commented starter file lives at [`dist/config/player.example.yaml`](dist/config/player.example.yaml) — copy it to `~/.config/sendspin/player.yaml` (user install) or `/etc/sendspin/player.yaml` (daemon) and uncomment the keys you want to set.
-
-**Search order** (first existing file wins; missing is not an error):
-
-1. `--config <path>` flag
-2. `$SENDSPIN_PLAYER_CONFIG`
-3. `~/.config/sendspin/player.yaml` (macOS: `~/Library/Application Support/sendspin/player.yaml`; Windows: `%AppData%\sendspin\player.yaml`)
-4. `/etc/sendspin/player.yaml` (daemon/system-wide)
-
-**Value precedence**, for every flag:
-
-1. CLI flag if passed
-2. Env var `SENDSPIN_PLAYER_<UPPER_SNAKE>` (e.g. `SENDSPIN_PLAYER_BUFFER_MS=200`)
-3. Config file key
-4. Built-in default
-
-**Example `player.yaml`:**
-
-```yaml
-# Identity
-name:       "Living Room"
-client_id:  "aa:bb:cc:dd:ee:ff"    # auto-derived from MAC if unset
-
-# Network
-server: ""                          # empty = use mDNS
-port:   8927
-
-# Audio
-buffer_ms:       150
-static_delay_ms: 0
-preferred_codec: ""                 # pcm (default), opus, flac
-buffer_capacity: 1048576
-
-# Device identity (shown in Music Assistant)
-product_name: ""
-manufacturer: ""
-
-# Behavior
-no_reconnect: false
-daemon:       false
-no_tui:       false
-log_file:     "sendspin-player.log"
-audio_device: ""                    # see --list-audio-devices; empty = miniaudio default
-```
-
-#### Selecting a playback device
-
-On Linux/macOS miniaudio picks its first-choice backend and that backend's default sink, which is usually fine on desktops but can route to the wrong card on a headless Pi (e.g. HDMI instead of a USB DAC or speaker HAT). To see what miniaudio sees and pick a specific device:
-
-```bash
-$ sendspin-player --list-audio-devices
-Playback devices:
-  [*] HDA Intel PCH: ALC257 Analog (hw:0,0)
-  [ ] HDMI 0 (hw:0,3)
-  [ ] USB Audio Device (hw:1,0)
-
-[*] = current default. Use --audio-device "<name>" or set audio_device: in player.yaml.
-```
-
-Then either:
-
-```bash
-./sendspin-player --audio-device "USB Audio Device"
-```
-
-Or in `player.yaml`:
-
-```yaml
-audio_device: "USB Audio Device"
-```
-
-The name must match exactly (case-sensitive, including any `(hw:X,Y)` suffix ALSA appends). If the name doesn't match, the player fails to start and lists every available device — silent fallback is deliberately not offered, because "it's not playing" is harder to debug than "it refused to start."
-
-#### Player Identity (`client_id`)
-
-The player sends a stable `client_id` so controllers like Music Assistant recognize it as the same player across restarts. Resolution order:
-
-1. `--client-id` flag (when set, also persisted to the config file as `client_id`)
-2. `client_id` key in the loaded `player.yaml`
-3. MAC address of the primary network interface (`xx:xx:xx:xx:xx:xx`)
-4. Freshly generated UUID (written to `player.yaml` as `client_id` and reused next launch)
-
-Removing `client_id` from `player.yaml` causes the next launch to re-derive, which the server will see as a new player.
-
-Running multiple players on one host:
-
-```bash
-./sendspin-player --name "Kitchen" --config ~/.config/sendspin/kitchen.yaml &
-./sendspin-player --name "Bedroom" --config ~/.config/sendspin/bedroom.yaml &
-```
-
-Each config file holds its own `client_id`, so the two instances register as two distinct players.
-
-#### Player TUI
-
-The player TUI shows:
-
-- Player name
-- Server connection status
-- Current audio title/artist
-- Codec and sample rate
-- Buffer depth
-- Clock sync statistics (offset, RTT, drift)
-- Playback statistics (received, played, dropped)
-- Volume control (Up/Down arrows or +/- keys)
-- Press `m` to mute/unmute
-- Press `q` or `Ctrl+C` to quit
+See [`examples/basic-player`](examples/basic-player/).
 
 ## Architecture
 
-Sendspin Go is built with a **library-first architecture**, providing three layers of APIs:
-
-### 1. High-Level API (`pkg/sendspin`)
-
-Simple Player and Server types for common use cases:
-
-- **Player**: Connect, play, control volume, get stats
-- **Server**: Stream from AudioSource, manage clients
-- **AudioSource**: Interface for custom audio sources
-
-### 2. Component APIs
-
-Lower-level building blocks for custom implementations:
-
-- **`pkg/audio`**: Format types, sample conversions, Buffer
-- **`pkg/audio/decode`**: PCM, Opus, FLAC, MP3 decoders
-- **`pkg/audio/output`**: Audio playback via malgo (miniaudio); 16/24/32-bit native
-- **`pkg/protocol`**: WebSocket client, message types
-- **`pkg/sync`**: Clock synchronization with drift compensation
-
-### 3. CLI Tools
-
-Thin wrappers around the library APIs:
-
-- **`cmd/sendspin-server`**: Full-featured server with TUI
-- **`cmd/sendspin-player`**: Full-featured player with TUI (main.go at root)
-
-### Server Pipeline
-
-The server streams audio in 20ms chunks with microsecond timestamps. Audio is buffered 500ms ahead to allow for network jitter and clock synchronization.
-
-**Processing flow:**
-
-1. Audio source (file decoder or test tone generator)
-2. Per-client codec negotiation (Opus or PCM)
-3. Timestamp generation using monotonic clock
-4. WebSocket binary message streaming
-
-### Player Pipeline
-
-The player uses a sophisticated scheduling system to ensure perfectly synchronized playback across multiple rooms.
-
-**Processing flow:**
-
-1. WebSocket client receives timestamped audio chunks
-2. Clock sync system converts server timestamps to local time
-3. Priority queue scheduler with startup buffering (200ms)
-4. Persistent audio player with streaming I/O pipe
-5. Software volume control and mixing
-
-### Clock Synchronization
-
-The player uses a simple, robust clock synchronization system:
-
-- Calculates server loop origin on first sync
-- Direct time base matching (no drift prediction)
-- Continuous RTT measurement for quality monitoring
-- Microsecond precision timestamps
-- 500ms startup buffer matches server's lead time
-
-## Example: Multi-Room Setup
-
-Terminal 1 - Start the server:
-
-```bash
-./sendspin-server --audio ~/Music/favorite-album.mp3
 ```
-
-Terminal 2 - Living room player:
-
-```bash
-./sendspin-player --name "Living Room"
+Network:  protocol/secure  (Noise transport, identities, psk, pairing tokens)
+Session:  protocol/session (client establishment, activate rules, messaging)
+Client:   sendspin        (ReceiverV2 + PlayerV2, scheduling, reconnect)
+Sync:     sync            (Kalman time filter)
+Audio:    audio           (codec decode, malgo output)
 ```
-
-Terminal 3 - Kitchen player:
-
-```bash
-./sendspin-player --name "Kitchen"
-```
-
-Both players will discover the server via mDNS and start playing in perfect sync.
 
 ## Development
 
-Run tests:
-
 ```bash
 make test
+make lint
 ```
 
-Clean binaries:
+Protocol conformance is documented in `docs/SPEC_COMPLIANCE.md` and the
+current client status in `docs/SPEC-V2_STATE.md`.
 
-```bash
-make clean
-```
+## License
 
-Install to GOPATH/bin:
-
-```bash
-make install
-```
-
-### Protocol conformance
-
-The [Sendspin protocol conformance suite](https://github.com/Sendspin/conformance) runs real network scenarios between adapter binaries and compares outputs against canonical hashes. sendspin-go has a first-class adapter and is tested on every PR via the `Conformance` GitHub Actions workflow.
-
-Run the same suite locally:
-
-```bash
-make conformance
-```
-
-This clones `Sendspin/conformance` into `../conformance` (sibling directory) and the `aiosendspin` reference peer on first run, installs the harness with `uv`, and runs `scripts/run_all.py` with this checkout pinned via the `CONFORMANCE_REPO_SENDSPIN_GO` environment variable. Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.12+.
-
-The published conformance report for the `main` branch is at https://sendspin.github.io/conformance/.
-
-## Contributing
-
-Found a bug or have a feature request? Please check existing issues or create a new one:
-
-**[View Issues](https://github.com/Sendspin/sendspin-go/issues)**
-
-### Recently Shipped
-
-**Stability + protocol audit** — graceful clock-sync-loss degradation, verified reconnection/backoff, server clean shutdown with live clients, leak/soak/stress/multi-room tests, and a full protocol-compliance audit against `Sendspin/spec` in `docs/SPEC_COMPLIANCE.md`
-
-**v1.2.0** — drop the oto backend and unify on malgo for true 24-bit output (see [#3](https://github.com/Sendspin/sendspin-go/issues/3) and [#26](https://github.com/Sendspin/sendspin-go/pull/26))
-
-**v1.1.0** — server-initiated client discovery, Kalman clock filter, code-path audit
-
-### Known Issues & Todo
-
-**Protocol & compatibility:**
-
-- [x] Validate all message types match the latest Sendspin Protocol spec — audited against [`Sendspin/spec`](https://github.com/Sendspin/spec) in [`docs/SPEC_COMPLIANCE.md`](docs/SPEC_COMPLIANCE.md): legacy track frozen for MA compatibility (documented), spec-v2 track drift (send_ahead, from_timestamp, field renames, `trust_level`) catalogued with severities
-- [ ] Test with additional Sendspin-compatible servers beyond Music Assistant
-- [x] Document protocol extensions or deviations — see [`docs/SPEC_COMPLIANCE.md` §1.2](docs/SPEC_COMPLIANCE.md)
-- [x] Explicit protocol-version negotiation — resolved: versioned roles (`role@vN`) are the negotiation; the current spec defines a hard `version: 1` gate in `client/init`, not a numeric handshake (see [`docs/SPEC_COMPLIANCE.md`](docs/SPEC_COMPLIANCE.md))
-
-**Audio:**
-
-- [ ] Test sample rate conversion quality (FLAC 96kHz → Opus 48kHz)
-- [ ] Real FLAC streaming decoder (currently a stub — see [#34](https://github.com/Sendspin/sendspin-go/issues/34))
-- [ ] Gapless playback
-- [ ] Volume curve optimization (currently linear)
-- [ ] Visualizer role support (FFT spectrum data)
-
-**Stability:**
-
-- [x] Reconnection handling and automatic retry — `Player.Reconnect` with jittered exponential backoff, max attempts, and rediscovery; verified end-to-end (server drop → reconnecting → reconnect) in `player_reconnect_test.go`
-- [x] Graceful degradation on clock sync loss — playback pauses with `ErrSyncLost` after a configurable grace and resumes with `ErrSyncRecovered` (`receiver_sync_test.go`)
-- [x] Memory leak testing for long-running sessions — goroutine-hygiene test on connection drop plus a connect/stream/close soak asserting bounded heap and goroutines (`stress_test.go`)
-- [x] Stress testing with many clients and multi-room sync accuracy with 5+ players — 16 concurrent clients and 5-player timestamp-alignment harnesses (`stress_test.go`)
-
-**Features:**
-
-- [ ] Album artwork end-to-end (downloader exists; not fully wired to TUI surfaces)
-- [ ] Player groups and zones
-- [ ] Playlist/queue management
-- [ ] Cross-fade between tracks
-
-**Developer experience:**
-
-- [ ] Godoc examples for all public APIs
-- [ ] Automated cross-platform test matrix (CI runs Linux only today)
-- [ ] Docker containers for easy deployment
-- [ ] Benchmarking suite
-- [ ] Clean up pre-existing tech debt surfaced by [PR #26](https://github.com/Sendspin/sendspin-go/pull/26): see issues [#27–#34](https://github.com/Sendspin/sendspin-go/issues)
-
-### Roadmap
-
-**Released**
-
-- **v1.2.0** — oto backend removed, malgo is the only audio output, true 24-bit pipeline end-to-end
-- **v1.1.0** — server-initiated client discovery, Kalman time filter, protocol audit fixes
-- **v1.0.0** — initial stable release, Music Assistant compatibility, precise multi-room sync
-
-**Planned**
-
-- **v2.0.0 (Advanced Multi-Room)** — player groups and zones, synchronized playback controls, playlist management
-
-## Protocol
-
-Implements the [Sendspin Protocol](https://github.com/Sendspin/spec) specification.
-
-> **Compliance** — message types are audited against the current spec in
-> [`docs/SPEC_COMPLIANCE.md`](docs/SPEC_COMPLIANCE.md). The shipped (`main`)
-> protocol is the legacy Music-Assistant-compatible profile (frozen); the
-> encrypted spec-v2 profile lives on the unreleased `feat/spec-v2` branch,
-> whose drift vs today's spec is catalogued in the same document.
-
-**Implementation Status:**
-
-- ✅ WebSocket transport
-- ✅ Client/Server handshake with versioned role negotiation (`player@v1`, `metadata@v1`)
-- ✅ Clock synchronization (NTP-style, two-dimensional Kalman filter on offset + drift)
-- ✅ Audio streaming (binary frames, microsecond timestamps)
-- ✅ Metadata messages (via `server/state`)
-- ✅ Control commands (volume, mute)
-- ✅ Multi-codec support (Opus with server-side resampling, 24-bit PCM)
-- ✅ True 24-bit audio output via malgo (v1.2.0)
-- ✅ Server-initiated client discovery (v1.1.0)
-- ✅ Graceful degradation on clock-sync loss + verified automatic reconnect (stability pass)
-- ⚠️ Album artwork — downloader exists, not fully wired through to all TUI surfaces
-- ⚠️ Visualizer role (planned)
+See [LICENSE](LICENSE).

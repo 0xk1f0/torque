@@ -1,126 +1,46 @@
-# Spec-v2 working state (branch `feat/spec-v2-current`)
+# Sendspin client — protocol conformance status
 
-**Purpose:** progress ledger for bringing the encrypted spec-v2 stack up to the
-current [`Sendspin/spec`](https://github.com/Sendspin/spec) (baseline `c281aeb`,
-2026-11-09) and then merging with `feat/protocol-and-stability` into `main`.
+This repository is the **Sendspin client**: a Noise-encrypted player that
+connects to a Sendspin server and plays synchronized audio. It is a
+client-only fork of `Sendspin/sendspin-go` — everything server-side
+(`pkg/protocol/server`, the legacy engine/TUI, and the legacy player) has been
+stripped.
 
-This branch is a working branch off `origin/feat/spec-v2` (the July 2026 stack:
-Noise `KKpsk2` transport, session model, pairing, send-ahead). It is **not yet
-ready to merge to `main`** — the `pkg/sendspin` binaries still run the legacy
-cleartext profile, and several interop-critical v2 gaps remain (below). Merging
-now would ship a `main` whose binaries speak a protocol older than the spec
-while the v2 SDK is still incomplete — worse than today's `main`.
+Spec baseline: [`Sendspin/spec`](https://github.com/Sendspin/spec)
+@ `c281aeb` (2026-11-09). See `docs/SPEC_COMPLIANCE.md` for the full
+message-by-message audit that this code was conformed against.
 
-## Done on this branch (committed)
+## Client conformance
 
-`fix(protocol): interop-core wire conformance (session/playback/server)` —
-the session/audio wire fixes from the `docs/SPEC_COMPLIANCE.md` §2.1 audit:
+Implemented and tested:
 
-- Audio chunk header is 13 bytes total (`[type][8B ts][4B send_ahead]`) with
-  `send_ahead` saturation (`0` / `0xffffffff`); min-length 13 enforced by the
-  client's binary parser once a v2 client exists.
-- Buffer accounting counts the 13-byte header + payload; completion time is
-  `timestamp + duration − output_delay_ms`; reset on `stream/end` and on a
-  full `stream/clear`; `from_timestamp` partial clears supported
-  (`BufferTracker.Reset` / `DiscardSince`, `playback.Group.ClearBuffers`).
-- Field renames to the current spec: `output_delay_ms`,
-  `set_output_delay`, `muted` in the player state object.
-- `client/state.available` is REQUIRED on every message; the server gates
-  `stream/start` on `available: true`.
-- `stream/clear` added (server_transmitted, from_timestamp?, roles) with
-  `GroupManager.ClearStream` + buffer plumbing.
-- `stream/end` no longer sends the non-spec `server_transmitted`.
-- `group/update` carries all fields (full state); `group_id` is 43-char
-  base64url of 32 bytes.
-- `server/activate` carries the `pairing` object `{method, format}`; method
-  ids now `dynamic_pairing_code` / `pairing_psk` / `static_pairing_code`;
-  the invented `management` activity is gone; the admissibility table matches
-  the spec (incl. unpaired-access rows).
-- `client/hello`: `trust_level` removed; `supported_pair_methods` is an object
-  keyed by method id; `player@v1_support` no longer carries
-  `supported_commands`; `server/hello` gains optional `languages`.
-- v2 server activates only roles it can serve (`ImplementedRoles` →
-  `player@vN`); visualizer/source/artwork/color are declined, so the server no
-  longer promises `active_roles` it cannot deliver (also avoids the
-  `server/state` MUST violation for metadata/color).
-- `stream/start` player object gains `codec_header`.
+- **Transport** (`pkg/protocol/secure`): Noise `KKpsk2` handshake as the
+  client/responder (`client/init` → `server/init` → `noise/handshake` × 2),
+  both cipher suites, `psk_category`-aware PSK selection with Sentinel
+  fallback on an initial-handshake lookup miss, type-1 flag fragmentation,
+  identities + `SP:` pairing tokens, and the re-handshake responder.
+  The initiator/server handshake and CPace primitives are retained as test
+  peers / pairing progress — they are not shipped as a server product.
+- **Session** (`pkg/protocol/session`): `EstablishClient`, activation
+  admissibility (`JudgeActivate`), `available`-first `client/state`, stream
+  lifecycle (`stream/start`/`clear`/`end` incl. `from_timestamp`),
+  metadata/controller `server/state`, player `server/command`, `server/unpair`.
+- **Client** (`pkg/sendspin`): `ReceiverV2`/`PlayerV2` — clock-sync bursts
+  before `available:true`, 13-byte audio chunk parsing, pcm/opus/flac decode,
+  scheduling with `output_delay_ms`, graceful degradation on clock-sync loss,
+  reconnect/backoff, volume/mute, controller commands.
+- **Sync** (`pkg/sync`): two-dimensional Kalman time filter.
 
-Full repo green under `-race`.
+## Known limitations
 
-## Remaining (audit-verified, in priority order)
+- **Server-side pairing** is out of scope for a client repo; the client
+  exposes `V2Config.ResolvePSK` for pairing records and the pairing *client*
+  flows, but operator pairing is a server concern.
+- **Server-side Sentinel credential-mismatch re-verify** (the counterpart to
+  the client's fallback) is a server concern; see `docs/SPEC_COMPLIANCE.md`.
 
-### 1. Secure transport — DONE on this branch (committed)
-- `psk_category` in noise message 1 (`lt`/`pr`/`sn`): server announces the
-  matched PSK's category; the client selects by (psk_id, category); a psk_id
-  held under a different category is a lookup miss; unknown categories are
-  malformed.
-- Client **Sentinel fallback** on an initial-handshake lookup miss
-  (`Responder.Accept` / `ClientHandshake`, opt-out via `SentinelFallback`);
-  re-handshakes never fall back.
-- **`server/error`** init failures: classified
-  `unsupported_version`/`unsupported_suite`/`malformed` (version before
-  suite), sent over the cleartext preamble, then close.
-- **Fragmentation** rewritten to the spec wire format: type-1 frames with a
-  flags byte (`[1][flags][orig_type][data]`, bit1 first, bit0 last, reserved
-  zero) and full malformed-sequence enforcement.
-- **Re-handshake discipline**: `ServerSession.Promote` sends `server/activate`
-  as the first new-key message and no longer re-sends
-  `server/hello`/`client/hello`; `ClientSession.CompletePromotion` reads that
-  activation (admissible at long-term trust) without re-sending client/hello.
+## Shipping
 
-**Known limitation (documented, not hidden):** the server-side credential-
-mismatch re-verify — retrying noise message 2 under the Sentinel when a
-non-Sentinel selected PSK fails — is not expressible with `flynn/noise` (the
-PSK is fixed at state creation and each state draws a fresh ephemeral, so one
-msg1 cannot be verified against two PSKs). A lost-record client that falls
-back is therefore dropped by this server; it would recover against a spec
-peer (e.g. aiosendspin) that implements the re-verify. This is the only §1
-item left, and it needs a handshake-level PSK swap this library can't do.
-
-### 2. Pairing — DONE on this branch (committed May-2026 slice)
-- Pairing-code derivation: label `"sendspin-pairing-code-derive-v1"`; digits =
-  `uint256_be(digest) mod 10^6` zero-padded to exactly 6 digits; qr_code =
-  `digest[0..24]`. Variable-length PIN / `pin_length` removed.
-- CPace `sid` includes the `round` component (BE32) after `pairing_index`.
-- **`wrapped_nonce_B`** (48-byte AEAD under
-  `K_wrap = SHA-256("sendspin-pair-nonce-wrap-v1" || sid || ISK)`);
-  `nonce_B` is never plaintext on the wire.
-- Pairing-PSK flow sends `client/pair-init` then `client/pair-finalize`
-  back-to-back; the server consumes both (spec sequence).
-- `server/unpair` message + `ServerSession.Unpair`; client handling is wired
-  in ReceiverV2 (OnUnpair).
-- Pairing token (`SP:` v0/v1) codec with RFC4648 base32 + 2→9
-  transliteration + lenient operator-input decoding.
-- `pair/abort` reasons use the spec vocabulary; delivered PSK equal to the
-  Sentinel (or pairing) PSK is a protocol error.
-- `client/pair-pending` and `client/pair-retry` are registered message types;
-  the full rounds/pending/attempt-timeout/static-window choreography and
-  pairing-record eviction remain a robustness follow-up.
-
-### 3. v2 client — DONE on this branch (committed May-2026 slice)
-- **`ReceiverV2`** (`pkg/sendspin/v2_client.go`): `secure.ClientHandshake` →
-  `session.EstablishClient` (verifies the player role is active) → 8-sample
-  clock-sync bursts before reporting availability → `stream/start`/`clear`/
-  `end` (incl. `from_timestamp` partial clears) → pcm/opus/flac decode →
-  scheduler → `Output()`. Parses the 13-byte audio header; `send_ahead` is
-  read and ignored for scheduling per spec. Handles `server/state` metadata,
-  `server/command` (volume/mute/output_delay), `server/unpair`, and
-  clock-sync-loss degradation.
-- **`PlayerV2`** (`pkg/sendspin/v2_player.go`): output backend, controller
-  commands (play/pause/next/previous/seek), volume/mute synced to the server,
-  and reconnect/backoff with rediscover.
-- `session` registry gained `server/state` (metadata/controller objects).
-- Fix flushed out by the tests: v2 server `StreamGroup` no longer derefs a
-  vanished group.
-- Tests: encrypted loopback streams a tone → verified decoded output with
-  ~20 ms-spaced timestamps; sync+availability ordering; PlayerV2 volume/mute.
-- The legacy `pkg/protocol/client.go` cleartext path is left frozen; the
-  binaries can move to `ReceiverV2`/`PlayerV2` at the cutover.
-
-### 4. Merge (only after 1–3 are green + reviewed)
-- Merge `feat/protocol-and-stability` into `feat/spec-v2-current` (mostly
-  additive: stability + legacy-safe protocol changes + docs; resolve pkg/
-  overlap in the legacy `pkg/sendspin` + `pkg/protocol/client.go`).
-- Then merge `feat/spec-v2-current` → `main` as the spec-v2 hard cutoff. The
-  plan's rule stands: no dual-support window; conformance harness
-  (`Sendspin/conformance`) must track the new spec and gate the release.
+- `cmd/sendspin-client` — the CLI.
+- `Dockerfile` / `.github/workflows/v2-client.yml` — multi-arch builds for
+  amd64/arm64/armv7/armv6.

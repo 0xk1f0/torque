@@ -1,10 +1,10 @@
 #!/bin/bash
-# ABOUTME: Dependency installation script for Resonate Protocol
+# ABOUTME: Dependency installation script for Sendspin
 # ABOUTME: Installs required audio libraries on macOS and Linux
 
 set -e
 
-echo "Installing Resonate Protocol dependencies..."
+echo "Installing Sendspin dependencies..."
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS

@@ -1,5 +1,4 @@
-# ABOUTME: CI workflow for pull requests and main branch pushes
-# ABOUTME: Tests on Linux, builds player + server on Linux/macOS/Windows
+# ABOUTME: CI for the Sendspin client — tests, vet, and lint on push/PR
 name: CI
 
 on:
@@ -8,10 +7,8 @@ on:
   pull_request:
     branches: [ main ]
 
-# Tell every `go` invocation across every job to drop the libopusfile parts of
-# gopkg.in/hraban/opus.v2. Our code never calls the opus.Stream API, and the
-# tag lets us skip installing libopusfile-dev / opusfile / mingw-w64-x86_64-opusfile
-# on the runners and lets the released binary not depend on libopusfile0 at runtime.
+# Drop the libopusfile parts of gopkg.in/hraban/opus.v2; the client never
+# calls the opus.Stream API, and the tag avoids libopusfile at runtime.
 env:
   GOFLAGS: -tags=nolibopusfile
 
@@ -30,9 +27,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libopus-dev libasound2-dev
 
-    # Phase 2 gate of the three-repo split, kept permanent: the SDK (pkg/)
-    # must never depend on internal/, which stays behind with the CLI repos.
-    # See docs/superpowers/plans/2026-07-18-repo-split-execution.md.
+    # The client SDK (pkg/) must never depend on internal/. Kept permanent as a
+    # boundary guard so CLI-specific code can't leak into the SDK.
     - name: SDK boundary guard (pkg/ must not import internal/)
       run: |
         deps=$(go list -deps ./pkg/... | grep 'sendspin-go/internal' || true)
@@ -42,14 +38,11 @@ jobs:
           exit 1
         fi
 
-    - name: Run tests
-      run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+    - name: Vet
+      run: go vet ./...
 
-    - name: Upload coverage
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.out
-        fail_ci_if_error: false
+    - name: Run tests
+      run: go test -v -race ./...
 
   lint:
     name: Lint
@@ -73,99 +66,3 @@ jobs:
       with:
         version: latest
         args: --timeout=5m
-
-  build:
-    name: Build ${{ matrix.os }}/${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            arch: amd64
-            runner: ubuntu-latest
-            ext: ""
-          - os: linux
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            ext: ""
-          - os: darwin
-            arch: arm64
-            runner: macos-latest
-            ext: ""
-          - os: windows
-            arch: amd64
-            runner: windows-latest
-            ext: ".exe"
-
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - uses: actions/setup-go@v5
-      with:
-        go-version: '1.27'
-
-    # Linux dependencies
-    - name: Install dependencies (Linux)
-      if: matrix.os == 'linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libopus-dev libasound2-dev
-
-    # macOS dependencies
-    - name: Install dependencies (macOS)
-      if: matrix.os == 'darwin'
-      run: brew install opus
-
-    # Windows dependencies via MSYS2
-    - name: Install dependencies (Windows)
-      if: matrix.os == 'windows'
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW64
-        update: false
-        install: >-
-          mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-pkg-config
-          mingw-w64-x86_64-opus
-
-    - name: Get version
-      id: version
-      shell: bash
-      run: echo "VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> $GITHUB_OUTPUT
-
-    # Linux + macOS build
-    - name: Build (Unix)
-      if: matrix.os != 'windows'
-      env:
-        CGO_ENABLED: "1"
-      run: |
-        LDFLAGS="-X github.com/Sendspin/sendspin-go/internal/version.Version=${{ steps.version.outputs.VERSION }}"
-        go build -ldflags "${LDFLAGS}" -o sendspin-player-${{ matrix.os }}-${{ matrix.arch }} .
-        go build -ldflags "${LDFLAGS}" -o sendspin-server-${{ matrix.os }}-${{ matrix.arch }} ./cmd/sendspin-server
-
-    # Windows build — needs MSYS2 MinGW on PATH for CGO
-    - name: Build (Windows)
-      if: matrix.os == 'windows'
-      shell: cmd
-      run: |
-        set PATH=D:\a\_temp\msys64\mingw64\bin;%PATH%
-        set CGO_ENABLED=1
-        set CC=gcc
-        set LDFLAGS=-X github.com/Sendspin/sendspin-go/internal/version.Version=${{ steps.version.outputs.VERSION }}
-        go build -ldflags "%LDFLAGS%" -o sendspin-player-windows-amd64.exe .
-        go build -ldflags "%LDFLAGS%" -o sendspin-server-windows-amd64.exe .\cmd\sendspin-server
-
-    - name: Upload player
-      uses: actions/upload-artifact@v4
-      with:
-        name: sendspin-player-${{ matrix.os }}-${{ matrix.arch }}
-        path: sendspin-player-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
-
-    - name: Upload server
-      uses: actions/upload-artifact@v4
-      with:
-        name: sendspin-server-${{ matrix.os }}-${{ matrix.arch }}
-        path: sendspin-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}

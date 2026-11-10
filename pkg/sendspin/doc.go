@@ -1,30 +1,23 @@
-// ABOUTME: High-level Sendspin library API
-// ABOUTME: Provides simple Player and Server APIs for most use cases
-// Package sendspin provides high-level APIs for Sendspin audio streaming.
+// ABOUTME: High-level Sendspin client API
+// ABOUTME: Provides the encrypted PlayerV2/ReceiverV2 client for most use cases
+
+// Package sendspin provides high-level APIs for the Sendspin client: an
+// encrypted (Noise) player that connects to a Sendspin server and plays
+// synchronized audio.
 //
-// This is the main entry point for most library users, providing:
-//   - Player: Connect to servers and play synchronized audio
-//   - Server: Serve audio to multiple clients
-//   - AudioSource: Interface for custom audio sources
+// The main entry point is PlayerV2, which composes a ReceiverV2 (connect,
+// handshake, session, clock sync, stream lifecycle, decode, scheduling) with
+// an audio output backend.
 //
-// For lower-level control, see the audio, protocol, sync, and discovery packages.
+// For lower-level control, see the protocol (transport/session/pairing),
+// audio (codecs, output), and sync (clock filter) packages.
 //
-// Example Player:
+// Example:
 //
-//	player, err := sendspin.NewPlayer(sendspin.PlayerConfig{
+//	player, err := sendspin.NewPlayerV2(sendspin.V2Config{
 //	    ServerAddr: "localhost:8927",
-//	    PlayerName: "Living Room",
-//	    Volume:     80,
+//	    Identity:   id, // *secure.Identity, persisted across reboots
+//	    Name:       "Living Room",
 //	})
 //	err = player.Connect()
-//	err = player.Play()
-//
-// Example Server:
-//
-//	source := sendspin.NewTestTone(48000, 2) // or implement AudioSource
-//	server, err := sendspin.NewServer(sendspin.ServerConfig{
-//	    Port:   8927,
-//	    Source: source,
-//	})
-//	err = server.Start()
 package sendspin

@@ -1,74 +1,32 @@
 # Basic Player Example
 
-This example demonstrates how to create a simple Sendspin player that connects to a server and plays audio.
+A minimal spec-v2 Sendspin client: connects to a Sendspin server over the
+encrypted (Noise) wire and plays synchronized audio.
 
-## What it does
+## What it demonstrates
 
-- Connects to a Sendspin server
-- Starts audio playback with automatic clock synchronization
-- Displays metadata (title, artist, album) when received
-- Shows playback status and statistics
-- Supports volume control and mute
+- Persistent client identity (`secure.LoadOrGenerateIdentity`; the public key
+  is the `client_id` on the wire)
+- Encrypted session establishment (`PlayerV2.Connect`)
+- Clock synchronization and stream lifecycle handled by the client
+- Metadata and error callbacks
 
-## Building
+## Running
 
 ```bash
 cd examples/basic-player
 go build
-```
-
-## Running
-
-Connect to a local server:
-
-```bash
-./basic-player
-```
-
-Connect to a specific server:
-
-```bash
 ./basic-player -server 192.168.1.100:8927
 ```
 
-Set custom player name and volume:
-
-```bash
-./basic-player -name "Living Room" -volume 80
-```
-
-## Command-line options
-
-- `-server` - Server address (default: localhost:8927)
-- `-name` - Player name (default: "Basic Player")
-- `-volume` - Initial volume 0-100 (default: 80)
-
-## Key features demonstrated
-
-1. **Simple configuration** - Just specify server address and player name
-2. **Callbacks** - Handle metadata, state changes, and errors
-3. **Automatic sync** - Clock synchronization happens automatically
-4. **Status monitoring** - Get real-time playback statistics
-
-## Code highlights
+The example uses a throwaway identity for brevity. A real client persists the
+key so the server recognizes the player across reboots:
 
 ```go
-// Create player with configuration
-config := sendspin.PlayerConfig{
-    ServerAddr: "localhost:8927",
-    PlayerName: "Living Room",
-    Volume:     80,
-    OnMetadata: func(meta sendspin.Metadata) {
-        log.Printf("Now playing: %s - %s", meta.Artist, meta.Title)
-    },
-}
-
-player, _ := sendspin.NewPlayer(config)
-player.Connect()
-player.Play()
+id, _ := secure.LoadOrGenerateIdentity("/home/pi/.config/sendspin/identity")
 ```
 
 ## Next steps
 
-- See `examples/custom-source/` for custom audio source implementation
-- Check out the player CLI (root main.go) for a full-featured TUI player
+- Full CLI with reconnect, output-delay, buffer tuning: `cmd/sendspin-client/`
+- Library docs: `pkg/sendspin/`

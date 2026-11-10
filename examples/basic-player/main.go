@@ -1,88 +1,44 @@
-// ABOUTME: Basic Sendspin player example
-// ABOUTME: Demonstrates how to connect to a server and play audio
+// ABOUTME: Minimal spec-v2 Sendspin client example
+// ABOUTME: Connects a PlayerV2 to an encrypted server and plays audio
 package main
 
 import (
-	"flag"
-	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/Sendspin/sendspin-go/pkg/protocol/secure"
 	"github.com/Sendspin/sendspin-go/pkg/sendspin"
 )
 
 func main() {
-	serverAddr := flag.String("server", "localhost:8927", "Sendspin server address")
-	playerName := flag.String("name", "Basic Player", "Player name")
-	volume := flag.Int("volume", 80, "Initial volume (0-100)")
-	flag.Parse()
+	// Identity: the client's persistent Curve25519 keypair. The public key is
+	// the client_id on the wire; reuse the same file across reboots so the
+	// server recognizes the player. GenerateIdentity is used here for brevity;
+	// production clients persist the key (secure.LoadOrGenerateIdentity).
+	id, err := secure.GenerateIdentity()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	config := sendspin.PlayerConfig{
-		ServerAddr: *serverAddr,
-		PlayerName: *playerName,
-		Volume:     *volume,
-		BufferMs:   500, // 500ms playback buffer
-		DeviceInfo: sendspin.DeviceInfo{
-			ProductName:     "Sendspin Example Player",
-			Manufacturer:    "Sendspin",
-			SoftwareVersion: "1.0.0",
-		},
-		OnMetadata: func(meta sendspin.Metadata) {
-			log.Printf("Now playing: %s - %s (%s)", meta.Artist, meta.Title, meta.Album)
-		},
-		OnStateChange: func(state sendspin.PlayerState) {
-			log.Printf("State changed: %s (volume: %d, muted: %v)", state.State, state.Volume, state.Muted)
+	player, err := sendspin.NewPlayerV2(sendspin.V2Config{
+		ServerAddr: "localhost:8927",
+		Identity:   id,
+		Name:       "Example Client",
+		BufferMs:   150,
+		OnMetadata: func(m sendspin.Metadata) {
+			log.Printf("now playing: %s - %s", m.Artist, m.Title)
 		},
 		OnError: func(err error) {
-			log.Printf("Error: %v", err)
+			log.Printf("client error: %v", err)
 		},
-	}
-
-	player, err := sendspin.NewPlayer(config)
+	})
 	if err != nil {
-		log.Fatalf("Failed to create player: %v", err)
+		log.Fatal(err)
 	}
-	defer player.Close()
 
-	log.Printf("Connecting to %s...", *serverAddr)
 	if err := player.Connect(); err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Fatal(err)
 	}
+	log.Printf("client connected (%s), streaming...", id.ID())
 
-	log.Printf("Connected! Starting playback...")
-
-	if err := player.Play(); err != nil {
-		log.Fatalf("Failed to start playback: %v", err)
-	}
-
-	go func() {
-		for {
-			status := player.Status()
-			stats := player.Stats()
-			if status.Connected {
-				log.Printf("Status: %s | %s %dHz %dch %dbit | Buffer: %dms | RTT: %dμs",
-					status.State,
-					status.Codec,
-					status.SampleRate,
-					status.Channels,
-					status.BitDepth,
-					stats.BufferDepth,
-					stats.SyncRTT)
-			}
-			// Sleep for 5 seconds
-			select {
-			case <-make(chan struct{}):
-			}
-		}
-	}()
-
-	// Wait for interrupt signal
-	fmt.Println("\nPress Ctrl+C to stop playback")
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
-
-	log.Printf("Shutting down...")
+	select {}
 }

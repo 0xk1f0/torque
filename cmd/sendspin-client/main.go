@@ -39,10 +39,10 @@ var (
 	showVersion    = flag.Bool("version", false, "Print version and exit")
 )
 
-// defaultIdentityPath prefers $SENDSPIN_PLAYER_CONFIG's directory for the
+// defaultIdentityPath prefers $SENDSPIN_CLIENT_CONFIG's directory for the
 // identity key, so it travels with the player config on the Pi.
 func defaultIdentityPath() string {
-	if dir := os.Getenv("SENDSPIN_PLAYER_CONFIG"); dir != "" {
+	if dir := os.Getenv("SENDSPIN_CLIENT_CONFIG"); dir != "" {
 		return filepath.Join(filepath.Dir(dir), "identity")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
