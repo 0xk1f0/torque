@@ -1,12 +1,12 @@
 [Unit]
-Description=Sendspin Client
+Description=Torque (Sendspin client)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/default/spinsync
-ExecStart=/usr/local/bin/spinsync -server=${SENDSPIN_SERVER} ${SPINSYNC_OPTS}
+EnvironmentFile=/etc/default/torque
+ExecStart=/usr/local/bin/torque -server=${TORQUE_SERVER} ${TORQUE_OPTS}
 Restart=on-failure
 RestartSec=5s
 # The identity key must survive restarts; keep it in a root-owned dir.

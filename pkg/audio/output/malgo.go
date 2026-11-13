@@ -13,7 +13,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/0xk1f0/spinsync/pkg/audio"
+	"github.com/0xk1f0/torque/pkg/audio"
 	"github.com/gen2brain/malgo"
 )
 
@@ -331,15 +331,20 @@ func (m *Malgo) Open(sampleRate, channels, bitDepth int) error {
 		return fmt.Errorf("failed to initialize playback device: %w", err)
 	}
 
+	// Publish the stream format before starting the device: malgo spawns the
+	// audio callback on its own thread when device.Start() is called, and
+	// dataCallback reads m.channels/m.bitDepth. Assigning them first means the
+	// callback can never observe them unset, even under -race.
+	m.sampleRate = sampleRate
+	m.channels = channels
+	m.bitDepth = bitDepth
+
 	if err := device.Start(); err != nil {
 		device.Uninit()
 		return fmt.Errorf("failed to start device: %w", err)
 	}
 
 	m.device = device
-	m.sampleRate = sampleRate
-	m.channels = channels
-	m.bitDepth = bitDepth
 	m.ready = true
 
 	log.Printf("Audio output initialized: device=%s %dHz/%dch/%d-bit period=%dms (malgo/%s)",

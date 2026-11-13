@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/0xk1f0/spinsync/pkg/audio"
-	"github.com/0xk1f0/spinsync/pkg/sync"
+	"github.com/0xk1f0/torque/pkg/audio"
+	"github.com/0xk1f0/torque/pkg/sync"
 )
 
 // maxStaticDelayMs is the upper bound the Sendspin spec defines for

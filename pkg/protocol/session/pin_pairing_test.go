@@ -5,7 +5,7 @@ package session
 import (
 	"testing"
 
-	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/torque/pkg/protocol/secure"
 )
 
 // pinPairingHarness runs a server-side and client-side PIN attempt against

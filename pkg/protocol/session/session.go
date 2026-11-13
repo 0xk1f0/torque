@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/torque/pkg/protocol/secure"
 )
 
 // ServerConfig configures the server side of session establishment.

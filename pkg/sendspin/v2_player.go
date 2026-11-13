@@ -10,9 +10,9 @@ import (
 	stdsync "sync"
 	"time"
 
-	"github.com/0xk1f0/spinsync/pkg/audio"
-	"github.com/0xk1f0/spinsync/pkg/audio/output"
-	"github.com/0xk1f0/spinsync/pkg/protocol/session"
+	"github.com/0xk1f0/torque/pkg/audio"
+	"github.com/0xk1f0/torque/pkg/audio/output"
+	"github.com/0xk1f0/torque/pkg/protocol/session"
 )
 
 // PlayerV2 plays audio from a spec-v2 server over the encrypted wire. It

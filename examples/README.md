@@ -51,7 +51,7 @@ player.Connect()
 
 ## Next Steps
 
-- Full CLI: `cmd/spinsync/`
+- Full CLI: `cmd/torque/`
 - Library docs: `pkg/sendspin/`
 - Lower-level APIs: `pkg/audio/`, `pkg/protocol/`, `pkg/sync/`
 
@@ -59,7 +59,7 @@ player.Connect()
 
 **No audio playing?**
 - Verify the server is reachable: `nc -vz <server> 8927`
-- Check your output device: `spinsync --help`
+- Check your output device: `torque --help`
 - Watch logs for clock-sync or connection errors
 
 **Connection refused?**

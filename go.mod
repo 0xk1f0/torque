@@ -1,4 +1,4 @@
-module github.com/0xk1f0/spinsync
+module github.com/0xk1f0/torque
 
 go 1.27
 

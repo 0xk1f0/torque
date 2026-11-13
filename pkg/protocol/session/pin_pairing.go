@@ -10,7 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/torque/pkg/protocol/secure"
 )
 
 // b64 is unpadded base64url, the encoding for every 32/48/64-byte pairing

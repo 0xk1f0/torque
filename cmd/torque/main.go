@@ -19,16 +19,16 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/0xk1f0/spinsync/internal/version"
-	"github.com/0xk1f0/spinsync/pkg/audio"
-	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
-	"github.com/0xk1f0/spinsync/pkg/protocol/session"
-	"github.com/0xk1f0/spinsync/pkg/sendspin"
+	"github.com/0xk1f0/torque/internal/version"
+	"github.com/0xk1f0/torque/pkg/audio"
+	"github.com/0xk1f0/torque/pkg/protocol/secure"
+	"github.com/0xk1f0/torque/pkg/protocol/session"
+	"github.com/0xk1f0/torque/pkg/sendspin"
 )
 
 var (
 	serverAddr     = flag.String("server", "", "Server address (host:port), e.g. 192.168.1.10:8927")
-	name           = flag.String("name", "", "Player friendly name (default: hostname-spinsync)")
+	name           = flag.String("name", "", "Player friendly name (default: hostname-torque)")
 	identityPath   = flag.String("identity", defaultIdentityPath(), "Path to the client identity key (generated on first run, 0600)")
 	bufferMs       = flag.Int("buffer-ms", 500, "Playback buffer size in milliseconds")
 	outputDelayMs  = flag.Int("output-delay-ms", 0, "output_delay_ms reported to the server (0-5000)")
@@ -39,10 +39,10 @@ var (
 	showVersion    = flag.Bool("version", false, "Print version and exit")
 )
 
-// defaultIdentityPath prefers $SENDSPIN_CLIENT_CONFIG's directory for the
-// identity key, so it travels with the player config on the Pi.
+// defaultIdentityPath prefers $TORQUE_CONFIG's directory for the identity
+// key, so it travels with the player config on the Pi.
 func defaultIdentityPath() string {
-	if dir := os.Getenv("SENDSPIN_CLIENT_CONFIG"); dir != "" {
+	if dir := os.Getenv("TORQUE_CONFIG"); dir != "" {
 		return filepath.Join(filepath.Dir(dir), "identity")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -69,13 +69,23 @@ func main() {
 	}
 	log.Printf("client_id: %s", id.ID())
 
+	// Name defaults to <hostname>-torque when not set.
+	name := *name
+	if name == "" {
+		if hn, err := os.Hostname(); err == nil && hn != "" {
+			name = hn + "-torque"
+		} else {
+			name = "torque"
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	p, err := sendspin.NewPlayerV2(sendspin.V2Config{
 		ServerAddr:     *serverAddr,
 		Identity:       id,
-		Name:           *name,
+		Name:           name,
 		BufferMs:       *bufferMs,
 		OutputDelayMs:  *outputDelayMs,
 		BufferCapacity: *bufferCapacity,

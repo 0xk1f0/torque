@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0xk1f0/spinsync/pkg/protocol/secure"
+	"github.com/0xk1f0/torque/pkg/protocol/secure"
 	"github.com/gorilla/websocket"
 )
 

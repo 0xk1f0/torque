@@ -1,7 +1,7 @@
-# ABOUTME: Builds the encrypted Sendspin client (spinsync) for every
+# ABOUTME: Builds the encrypted Sendspin client (torque) for every
 # ABOUTME: Raspberry Pi architecture plus desktop x86_64, including armv6 for
 # ABOUTME: Pi 1 / Zero / Zero W. All cells cross-compile on a single runner.
-name: spinsync (Raspberry Pi)
+name: torque (Raspberry Pi)
 
 on:
   push:
@@ -16,7 +16,7 @@ env:
   GOFLAGS: -tags=nolibopusfile
 
 jobs:
-  # spinsync uses libopus (cgo) and miniaudio (cgo), so the cross cells
+  # torque uses libopus (cgo) and miniaudio (cgo), so the cross cells
   # need a C cross toolchain plus per-architecture libopus/ALSA. Everything is
   # cross-compiled from one ubuntu-latest runner: amd64 is host-native, arm64
   # uses the aarch64-linux-gnu toolchain, and arm32 uses the gnueabihf
@@ -24,7 +24,7 @@ jobs:
   # affects the Go code, and an armv7-built miniaudio would crash on an armv6
   # CPU (Pi Zero / Zero W).
   test:
-    name: Test spinsync
+    name: Test torque
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -38,9 +38,9 @@ jobs:
         sudo apt-get install -y libopus-dev libasound2-dev
 
     - name: Vet
-      run: go vet ./pkg/... ./cmd/spinsync/...
+      run: go vet ./pkg/... ./cmd/torque/...
 
-    - name: Run spinsync + protocol tests
+    - name: Run torque + protocol tests
       run: go test -race -count=1 ./pkg/sendspin/... ./pkg/protocol/...
 
   build:
@@ -124,21 +124,21 @@ jobs:
         [ -n "${{ matrix.cc }}" ]         && export CC=${{ matrix.cc }}
         [ -n "${{ matrix.pkgconfig }}" ]  && export PKG_CONFIG_PATH=${{ matrix.pkgconfig }}
         [ -n "${{ matrix.cgo_cflags }}" ] && export CGO_CFLAGS="${{ matrix.cgo_cflags }}" CGO_LDFLAGS="${{ matrix.cgo_cflags }}"
-        LDFLAGS="-X github.com/0xk1f0/spinsync/internal/version.Version=${{ steps.version.outputs.VERSION }} -s -w"
+        LDFLAGS="-X github.com/0xk1f0/torque/internal/version.Version=${{ steps.version.outputs.VERSION }} -s -w"
         go build -trimpath -ldflags "${LDFLAGS}" \
-          -o spinsync-${{ matrix.name }} ./cmd/spinsync
+          -o torque-${{ matrix.name }} ./cmd/torque
 
     # Assert the produced ELF really is the advertised architecture — catches
     # the armv7-compiled-cgo-on-armv6 trap before it reaches a Zero W.
     - name: Verify architecture
       run: |
-        file spinsync-${{ matrix.name }}
+        file torque-${{ matrix.name }}
         if [ "${{ matrix.goarch }}" = "arm" ]; then
-          readelf -A spinsync-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
+          readelf -A torque-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
         fi
 
     - name: Upload sendspin client
       uses: actions/upload-artifact@v4
       with:
-        name: spinsync-${{ matrix.name }}
-        path: spinsync-${{ matrix.name }}
+        name: torque-${{ matrix.name }}
+        path: torque-${{ matrix.name }}

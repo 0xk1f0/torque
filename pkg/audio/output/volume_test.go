@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/0xk1f0/spinsync/pkg/audio"
+	"github.com/0xk1f0/torque/pkg/audio"
 )
 
 func TestVolumeMultiplier(t *testing.T) {

@@ -1,10 +1,10 @@
-# spinsync
+# torque
 
-**spinsync** is a Go implementation of the [Sendspin Protocol](https://github.com/Sendspin/spec)
+**torque** is a Go implementation of the [Sendspin Protocol](https://github.com/Sendspin/spec)
 **client**: a Noise-encrypted player that connects to a Sendspin server and
 plays synchronized audio.
 
-`spinsync` is a fork of [`Sendspin/sendspin-go`](https://github.com/Sendspin/sendspin-go),
+`torque` is a fork of [`Sendspin/sendspin-go`](https://github.com/Sendspin/sendspin-go),
 reworked **client-only** — every server component (the v2 server, the legacy
 engine/TUI, discovery, and the legacy player) was removed.
 
@@ -25,7 +25,7 @@ engine/TUI, discovery, and the legacy player) was removed.
 Requirements: Go ≥ 1.27, `pkg-config`, `libopus` (and ALSA on Linux).
 
 ```bash
-make            # builds ./spinsync
+make            # builds ./torque
 make test       # go test ./...
 make lint       # golangci-lint
 ```
@@ -42,7 +42,7 @@ Same matrix in CI: `.github/workflows/v2-client.yml`.
 ## Usage
 
 ```bash
-spinsync -server 192.168.1.10:8927 --name "Living Room"
+torque -server 192.168.1.10:8927 --name "Living Room"
 ```
 
 | Flag | Description |
@@ -56,7 +56,7 @@ spinsync -server 192.168.1.10:8927 --name "Living Room"
 | `--unpaired-access` | Admit unpaired servers (default true) |
 
 Run as a service: `sudo make install-daemon`, then configure
-`/etc/default/spinsync`. One-shot Pi install: `scripts/quickstart-pi.sh`.
+`/etc/default/torque`. One-shot Pi install: `scripts/quickstart-pi.sh`.
 
 ## Library
 
@@ -85,7 +85,7 @@ pkg/protocol/session Client establishment, activate rules, messaging, pairing
 pkg/protocol/playback Player-audio chunk parsing (13-byte header, send_ahead)
 pkg/audio            Codec decode (pcm/opus/flac), malgo output
 pkg/sync             Kalman clock filter
-cmd/spinsync         The CLI
+cmd/torque         The CLI
 ```
 
 ## Protocol conformance
