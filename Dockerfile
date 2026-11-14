@@ -3,18 +3,32 @@
 # ABOUTME: Use `docker buildx --platform` to cross-build for every Raspberry Pi
 # ABOUTME: architecture (armv6, armv7, arm64) plus desktop x86_64.
 #
-# Build binaries for all targets in one shot:
+# Build binaries for all targets in one shot (docker buildx):
 #   docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6 \
 #       --target export --output type=local,dest=dist .
 #     produces dist/linux_amd64/torque, dist/linux_arm64/torque,
 #     dist/linux_arm_v7/torque, dist/linux_arm_v6/torque.
+#   (Requires binfmt/QEMU registration + a buildx builder; see below.)
 #
 # Build just one target (or a runnable image via --target runtime):
-#   docker buildx build --platform linux/arm/v6 --target export \
+#   docker buildx build --platform linux/arm64 --target export \
 #       --output type=local,dest=dist .
 #   docker buildx build --platform linux/arm64 --target runtime -t torque .
 #
-# Prerequisites: cross-platform builds need QEMU/binfmt registration:
+# The same matrix with podman (per platform; set ${p//\//_} = linux_arm64, ...):
+#   for p in linux/amd64 linux/arm64 linux/arm/v7 linux/arm/v6; do
+#     plat="$p"; extra=""
+#     if [ "$p" = linux/arm/v6 ]; then
+#       # buildx sets TARGETVARIANT=v6 from --platform; podman does not. Build
+#       # the arm/v7 cell and force armv6 codegen with ARM_VARIANT so the
+#       # cgo audio stack (libopus/miniaudio) matches the Pi Zero CPU.
+#       plat=linux/arm/v7; extra="--build-arg ARM_VARIANT=v6"
+#     fi
+#     podman build --platform "$plat" $extra --target export \
+#       --output type=local,dest="dist/${p//\//_}" .
+#   done
+#
+# Prerequisites (docker): cross-platform builds need QEMU/binfmt registration:
 #   docker run --privileged tonistiigi/binfmt:latest --install all
 #   docker buildx create --use
 #
@@ -27,13 +41,11 @@
 #     dependency, consistent with the rest of the build.
 
 # ---------------------------------------------------------------------------
-# builder — compiles torque for the requested --platform.
 FROM golang:1.27-bookworm AS builder
 
-# buildx fills these automatically from --platform (TARGETARCH=amd64|arm64|arm,
-# TARGETVARIANT=v6|v7). VERSION is passed for the -X ldflag.
 ARG TARGETARCH
 ARG TARGETVARIANT
+ARG ARM_VARIANT          # set to v6 to force armv6 codegen
 ARG VERSION=dev
 
 ENV GOFLAGS=-tags=nolibopusfile \
@@ -56,7 +68,7 @@ COPY . .
 
 RUN set -eu; \
     if [ "${TARGETARCH}" = "arm" ]; then \
-        if [ "${TARGETVARIANT}" = "v6" ]; then \
+        if [ "${ARM_VARIANT:-$TARGETVARIANT}" = "v6" ]; then \
             export GOARM=6 CGO_CFLAGS="-march=armv6 -mfpu=vfp -mfloat-abi=hard" \
                           CGO_LDFLAGS="-march=armv6 -mfpu=vfp -mfloat-abi=hard"; \
         else \

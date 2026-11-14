@@ -1,0 +1,16 @@
+[Unit]
+Description=Torque (Sendspin client)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/torque
+ExecStart=/usr/local/bin/torque --server '${TORQUE_SERVER}' $TORQUE_OPTS
+Restart=on-failure
+RestartSec=5s
+User=torque
+Group=audio
+
+[Install]
+WantedBy=multi-user.target
