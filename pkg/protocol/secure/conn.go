@@ -281,6 +281,14 @@ func newConn(ws *websocket.Conn, sess *Session, peerID string, maxMessageSize in
 	// Transport frames are ciphertexts of at most maxNoiseMessage bytes.
 	ws.SetReadLimit(maxNoiseMessage + 1024)
 	ws.SetReadDeadline(time.Time{})
+	// The handshake left a write deadline behind (writeTextFrame sets one per
+	// handshake message). Leaving it in place would make every transport write
+	// fail with an i/o timeout once it lapses (~HandshakeTimeout after the last
+	// handshake write), silently killing all outbound traffic on a long-lived
+	// connection — the read loop sees no error, so it never reconnects. A
+	// streaming connection must carry no write deadline; liveness is handled by
+	// the read side.
+	ws.SetWriteDeadline(time.Time{})
 	return &Conn{
 		ws:     ws,
 		sess:   sess,

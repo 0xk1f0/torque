@@ -6,7 +6,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/torque
-ExecStart=/usr/local/bin/torque -server=${TORQUE_SERVER} ${TORQUE_OPTS}
+# Run through a shell so ${TORQUE_OPTS} is word-split and its quotes removed.
+# systemd does NOT split an unquoted ${VAR} like a shell would: without this,
+# multiple flags in TORQUE_OPTS arrive as one giant argument and torque exits
+# with status=2 ("flag provided but not defined"). exec() keeps torque as the
+# PID systemd tracks (no lingering shell).
+ExecStart=/bin/sh -c 'exec /usr/local/bin/torque --server "${TORQUE_SERVER}" ${TORQUE_OPTS}'
 Restart=on-failure
 RestartSec=5s
 # The identity key must survive restarts; keep it in a root-owned dir.

@@ -24,6 +24,10 @@ type PlayerV2 struct {
 	recv   *ReceiverV2
 	out    output.Output
 
+	// store persists client state (pairing + volume/mute) tied to the
+	// identity; nil when the config provided none.
+	store ClientStore
+
 	state   PlayerState
 	stateMu stdsync.Mutex
 
@@ -50,14 +54,23 @@ func NewPlayerV2(config V2Config) (*PlayerV2, error) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+
+	volume, muted := 100, false
+	if config.Store != nil {
+		if st, ok := config.Store.GetPlayerState(); ok {
+			volume, muted = st.Volume, st.Muted
+		}
+	}
+
 	return &PlayerV2{
 		config: config,
+		store:  config.Store,
 		ctx:    ctx,
 		cancel: cancel,
 		state: PlayerState{
 			State:     "idle",
-			Volume:    100,
-			Muted:     false,
+			Volume:    volume,
+			Muted:     muted,
 			Connected: false,
 		},
 	}, nil
@@ -95,6 +108,11 @@ func (p *PlayerV2) Connect() error {
 	p.recv = recv
 	p.setState(func(s *PlayerState) { s.Connected = true; s.State = "idle" })
 
+	// Propagate the (possibly restored) volume/mute to the freshly connected
+	// receiver so the server sees the operator's loudness immediately instead
+	// of the receiver's default 100/off until the next command.
+	p.applyStateToReceiver()
+
 	go p.consumeAudio(recv)
 
 	if cfg.Reconnect.Enabled {
@@ -123,13 +141,17 @@ func (p *PlayerV2) ensureCapsResolved() {
 
 // onStreamStart opens the output at the negotiated format.
 func (p *PlayerV2) onStreamStart(format audio.Format) {
+	p.stateMu.Lock()
 	if p.out == nil {
 		p.out = p.config.Output
 		if p.out == nil {
 			p.out = output.NewMalgo("")
 		}
 	}
-	if err := p.out.Open(format.SampleRate, format.Channels, format.BitDepth); err != nil {
+	out := p.out
+	p.stateMu.Unlock()
+
+	if err := out.Open(format.SampleRate, format.Channels, format.BitDepth); err != nil {
 		p.notifyError(fmt.Errorf("v2: open output: %w", err))
 		return
 	}
@@ -141,8 +163,8 @@ func (p *PlayerV2) onStreamStart(format audio.Format) {
 	p.state.BitDepth = format.BitDepth
 	p.state.State = "playing"
 	p.stateMu.Unlock()
-	p.out.SetVolume(vol)
-	p.out.SetMuted(mut)
+	out.SetVolume(vol)
+	out.SetMuted(mut)
 	p.notifyStateChange()
 }
 
@@ -157,8 +179,11 @@ func (p *PlayerV2) consumeAudio(recv *ReceiverV2) {
 			if !ok {
 				return
 			}
-			if p.out != nil {
-				if err := p.out.Write(buf.Samples); err != nil {
+			p.stateMu.Lock()
+			out := p.out
+			p.stateMu.Unlock()
+			if out != nil {
+				if err := out.Write(buf.Samples); err != nil {
 					p.notifyError(fmt.Errorf("v2: playback error: %w", err))
 				}
 			}
@@ -191,6 +216,7 @@ func (p *PlayerV2) runReconnectLoop(initial *ReceiverV2) {
 		p.recv = next
 		p.stateMu.Unlock()
 		p.setState(func(s *PlayerState) { s.Connected = true })
+		p.applyStateToReceiver()
 		go p.consumeAudio(next)
 	}
 }
@@ -206,7 +232,7 @@ func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
 			return nil, false
 		}
 		jittered := jitter(delay, 0.2)
-		log.Printf("V2 reconnect attempt %d in %v", attempt, jittered)
+		log.Printf("reconnect attempt %d in %v", attempt, jittered)
 		select {
 		case <-p.ctx.Done():
 			return nil, false
@@ -222,11 +248,11 @@ func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
 		recv, err := NewReceiverV2(cfg2)
 		if err == nil {
 			if err = recv.Connect(); err == nil {
-				log.Printf("V2 reconnect: connected to %s on attempt %d", cfg2.ServerAddr, attempt)
+				log.Printf("reconnect: connected to %s on attempt %d", cfg2.ServerAddr, attempt)
 				return recv, true
 			}
 		}
-		log.Printf("V2 reconnect attempt %d failed: %v", attempt, err)
+		log.Printf("reconnect attempt %d failed: %v", attempt, err)
 		delay = time.Duration(float64(delay) * cfg.Multiplier)
 		if delay > cfg.MaxDelay {
 			delay = cfg.MaxDelay
@@ -280,7 +306,8 @@ func (p *PlayerV2) sendCtl(cmd session.ControllerCommand) error {
 	return nil
 }
 
-// SetVolume sets the local volume (0-100) and reports it to the server.
+// SetVolume sets the local volume (0-100), persists it, and reports it to the
+// server.
 func (p *PlayerV2) SetVolume(volume int) error {
 	if volume < 0 {
 		volume = 0
@@ -292,6 +319,7 @@ func (p *PlayerV2) SetVolume(volume int) error {
 	p.state.Volume = volume
 	out := p.out
 	recv := p.recv
+	muted := p.state.Muted
 	p.stateMu.Unlock()
 	if out != nil {
 		out.SetVolume(volume)
@@ -299,11 +327,16 @@ func (p *PlayerV2) SetVolume(volume int) error {
 	if recv != nil {
 		recv.SetVolume(volume)
 	}
+	if p.store != nil {
+		if err := p.store.PutPlayerState(VolumeState{Volume: volume, Muted: muted}); err != nil {
+			p.notifyError(fmt.Errorf("v2: persist volume: %w", err))
+		}
+	}
 	p.notifyStateChange()
 	return nil
 }
 
-// Mute sets local mute and reports it to the server.
+// Mute sets local mute, persists it, and reports it to the server.
 func (p *PlayerV2) Mute(muted bool) error {
 	p.stateMu.Lock()
 	p.state.Muted = muted
@@ -320,8 +353,28 @@ func (p *PlayerV2) Mute(muted bool) error {
 	if recv != nil {
 		recv.SetMuted(muted)
 	}
+	if p.store != nil {
+		if err := p.store.PutPlayerState(VolumeState{Volume: vol, Muted: muted}); err != nil {
+			p.notifyError(fmt.Errorf("v2: persist mute: %w", err))
+		}
+	}
 	p.notifyStateChange()
 	return nil
+}
+
+// applyStateToReceiver pushes the current volume/mute into the active receiver
+// (if any), so the server is told the right loudness on first connect and after
+// every reconnect.
+func (p *PlayerV2) applyStateToReceiver() {
+	p.stateMu.Lock()
+	recv := p.recv
+	vol, mut := p.state.Volume, p.state.Muted
+	p.stateMu.Unlock()
+	if recv == nil {
+		return
+	}
+	recv.SetVolume(vol)
+	recv.SetMuted(mut)
 }
 
 // Status returns the current player state.
@@ -368,6 +421,6 @@ func (p *PlayerV2) notifyError(err error) {
 	if p.config.OnError != nil {
 		p.config.OnError(err)
 	} else {
-		log.Printf("V2 player: %v", err)
+		log.Printf("player: %v", err)
 	}
 }

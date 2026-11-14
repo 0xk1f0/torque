@@ -86,6 +86,43 @@ func digitsCodePair() (provide func() ([]byte, error), emit func(string)) {
 		func(code string) { ch <- []byte(code) }
 }
 
+// TestReadControl_SkipsServerTime guards the pairing-time clock-sync
+// interaction: a later server/activate drives pairing on the client's single
+// readLoop goroutine while the clock-sync burst may still have a server/time
+// reply in flight, so the pairing reader sees a ServerTime ahead of the real
+// pair message. readControl must skip the async server/time (it is not a
+// protocol state event) and return the next genuine control message, instead
+// of failing with "expected ..., got *ServerTime".
+func TestReadControl_SkipsServerTime(t *testing.T) {
+	serverConn, clientConn := loopback(t)
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	if err := writeMessage(serverConn, ServerTime{
+		ClientTransmitted: 1,
+		ServerReceived:    2,
+		ServerTransmitted: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const nonce = "AAAA"
+	if err := writeMessage(serverConn, ServerPairInit{NonceA: nonce}); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err := readControl(clientConn)
+	if err != nil {
+		t.Fatalf("readControl: %v", err)
+	}
+	got, ok := msg.(*ServerPairInit)
+	if !ok {
+		t.Fatalf("readControl returned %T, want *ServerPairInit (ServerTime must be skipped)", msg)
+	}
+	if got.NonceA != nonce {
+		t.Fatalf("NonceA = %q, want %q", got.NonceA, nonce)
+	}
+}
+
 func TestPINPairing_DynamicDigitsFullRoundTrip(t *testing.T) {
 	clientStore := NewMemoryPairingStore()
 	serverStore := NewMemoryPairingStore()

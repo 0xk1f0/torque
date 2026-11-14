@@ -31,7 +31,14 @@ const V2TimeSyncBurstSize = 8
 // Defaults for clock-sync loss monitoring on the v2 client (see V2Config).
 const (
 	defaultV2SyncMonitorInterval = 500 * time.Millisecond
-	defaultV2SyncLossGrace       = 5 * time.Second
+	// SyncLossGrace must comfortably exceed the clock-sync cadence
+	// (clockSyncLoop bursts every 10s). A grace shorter than the burst interval
+	// makes the receiver go stale mid-cycle and oscillate pause/resume: it syncs
+	// at t=0, the filter times out at t≈grace, playback pauses, then resumes at
+	// the next burst only to pause again. 30s is three burst intervals, so a
+	// live connection stays fresh and loss is declared only for a genuinely dead
+	// server (30s with no client/time reply).
+	defaultV2SyncLossGrace = 30 * time.Second
 )
 
 // V2Config configures the spec-v2 client (ReceiverV2 / PlayerV2).
@@ -51,8 +58,6 @@ type V2Config struct {
 	MaxSampleRate  int
 	MaxBitDepth    int
 
-	// UnpairedAccess advertises whether the client admits unpaired servers.
-	UnpairedAccess bool
 	// ResolvePSK looks up a pairing record: given the server's psk_id and
 	// psk_category from noise message 1, return the matching PSK (a psk_id
 	// held under a different category is a miss, and the client falls back to
@@ -62,6 +67,15 @@ type V2Config struct {
 	// the server/activate admissibility the client will accept. Defaults to
 	// Sentinel (or long-term if ResolvePSK matched a record).
 	PSKCategory session.PSKCategory
+	// Store persists all client state tied to the identity — the long-term
+	// PSK minted by dynamic pairing-code pairing (so a paired client
+	// reconnects without re-pairing) and the player volume/mute. Required to
+	// complete pairing.
+	Store ClientStore
+	// PairingCodeEmitted receives the dynamic pairing code (6 digits for
+	// 'digits', an "SP: v1" token for 'qr_code') during dynamic pairing-code
+	// pairing, for the operator to enter on the server. Nil logs it.
+	PairingCodeEmitted func(code string)
 
 	// SyncMonitorInterval / SyncLossGrace control the clock-sync-loss
 	// graceful-degradation monitor (same semantics as ReceiverConfig).
@@ -102,6 +116,15 @@ type ReceiverV2 struct {
 
 	timeSyncResp chan session.ServerTime
 
+	// syncBurstMu serializes clock-sync bursts. Both clockSyncLoop (periodic)
+	// and activatePlayer's syncUntilReady can race to run a burst; without a
+	// lock they send probes concurrently into the shared timeSyncResp channel,
+	// stealing each other's replies so both come up empty (logged as duplicated
+	// "sync sample timed out" lines and a multi-second RTT). The periodic loop
+	// is the steady-state owner, so a contender that loses the TryLock just
+	// yields rather than queue.
+	syncBurstMu stdsync.Mutex
+
 	streamMu        stdsync.Mutex
 	scheduler       *Scheduler
 	schedulerCancel context.CancelFunc
@@ -117,10 +140,32 @@ type ReceiverV2 struct {
 	volume    int
 	muted     bool
 
+	// matchedCat is the PSK category the handshake resolver selected for this
+	// connection (set by defaultResolvePSK; 0 when the caller supplied a
+	// custom ResolvePSK). guarded by stateMu.
+	matchedCat session.PSKCategory
+	// paired records that this connection went through the pairing_psk flow.
+	// guarded by stateMu.
+	paired bool
+	// hello is the client/hello this connection advertised; retained so a
+	// pairing activation arriving after the initial activate can re-run the
+	// pairing flow. guarded by stateMu.
+	hello session.ClientHello
+	// pairingIndex counts pairing server/activate messages seen since the last
+	// Noise handshake; each pairing activate consumes the next index. The first
+	// pairing activate (even when not the first overall) has index 1. guarded
+	// by stateMu.
+	pairingIndex int
+
 	output    chan audio.Buffer
 	syncLost  atomic.Bool
 	connected atomic.Bool
-	pumpWG    stdsync.WaitGroup
+	// pairingActive is true while a PIN pairing flow has exclusive use of the
+	// connection (it runs on the single readLoop goroutine and reads frames
+	// directly). While set, clockSyncLoop withholds new bursts so their
+	// server/time replies never interleave with pairing messages.
+	pairingActive atomic.Bool
+	pumpWG        stdsync.WaitGroup
 }
 
 // NewReceiverV2 builds a v2 client receiver. Identity is required.
@@ -137,21 +182,21 @@ func NewReceiverV2(cfg V2Config) (*ReceiverV2, error) {
 	if cfg.BufferCapacity == 0 {
 		cfg.BufferCapacity = 1048576
 	}
-	// Default to admitting unpaired servers so a fresh player (no pairing
-	// record) is immediately playable; set false in strict deployments.
-	if !cfg.UnpairedAccess {
-		cfg.UnpairedAccess = true
-	}
 	if cfg.SyncMonitorInterval <= 0 {
 		cfg.SyncMonitorInterval = defaultV2SyncMonitorInterval
 	}
 	if cfg.SyncLossGrace <= 0 {
 		cfg.SyncLossGrace = defaultV2SyncLossGrace
 	}
+	// The ClockSync staleness window must match the graceful-degradation grace,
+	// else CheckQuality reports QualityLost partway through each clock-sync
+	// cycle (see defaultV2SyncLossGrace) and the monitor oscillates pause/resume.
+	clockSync := sync.NewClockSync()
+	clockSync.SetStaleAfter(cfg.SyncLossGrace)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ReceiverV2{
 		config:       cfg,
-		clockSync:    sync.NewClockSync(),
+		clockSync:    clockSync,
 		ctx:          ctx,
 		cancel:       cancel,
 		timeSyncResp: make(chan session.ServerTime, 16),
@@ -174,17 +219,21 @@ func (r *ReceiverV2) ClockSync() *sync.ClockSync { return r.clockSync }
 // clock-sync burst, and starts the background loops.
 func (r *ReceiverV2) Connect() error {
 	u := url.URL{Scheme: "ws", Host: r.config.ServerAddr, Path: "/sendspin"}
-	log.Printf("V2 connecting to %s", u.String())
+	log.Printf("connecting to %s", u.String())
 
 	ws, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", u.String(), err)
 	}
 
+	resolve := r.config.ResolvePSK
+	if resolve == nil {
+		resolve = r.defaultResolvePSK
+	}
 	conn, _, err := secure.ClientHandshake(ws, secure.ClientHandshakeConfig{
 		Identity:         r.config.Identity,
 		HandshakeTimeout: 10 * time.Second,
-		SelectPSK:        r.config.ResolvePSK,
+		SelectPSK:        resolve,
 	})
 	if err != nil {
 		ws.Close()
@@ -198,20 +247,63 @@ func (r *ReceiverV2) Connect() error {
 		return fmt.Errorf("session establish: %w", err)
 	}
 	if !hasRole(sess.ActiveRoles, "player") {
-		conn.Close()
-		return fmt.Errorf("server did not activate the player role (active_roles=%v)", sess.ActiveRoles)
+		log.Printf("server/activate granted no player role (activities=%v, active_roles=%v, pairing_method=%s)", sess.Activate.Activities, sess.ActiveRoles, pairingMethodName(sess.Activate.Pairing))
+		if sess.Activate.Pairing != nil {
+			// The server asked to pair: run the selected method now and use
+			// the promoted session.
+			after, err := r.pairIfRequested(sess, hello)
+			if err != nil {
+				conn.Close()
+				return err
+			}
+			sess = after
+		} else {
+			// The server holds the connection with no roles and no pairing.
+			// This is normal for servers like Home Assistant that wait for an
+			// operator action before driving pairing or activating roles. Stay
+			// connected; readLoop reacts to the later server/activate.
+			log.Printf("server holding the connection at empty activities; awaiting a pairing or role activation")
+		}
 	}
 
+	r.stateMu.Lock()
+	r.hello = hello
+	r.stateMu.Unlock()
 	r.conn = conn
 	r.sess = sess
 	r.connected.Store(true)
-	log.Printf("V2 session established with %s (roles=%v)", sess.ServerName, sess.ActiveRoles)
+	log.Printf("session established with %s (roles=%v)", sess.ServerName, sess.ActiveRoles)
 
 	// Start the reader first so server/time replies are drained while the
 	// initial clock-sync burst is in flight.
 	go r.readLoop()
 	go r.clockSyncLoop()
 	go r.watchClockSync()
+
+	// Only declare availability once the player role is active. On the
+	// empty-activate path that happens later, when readLoop sees a pairing or
+	// role activation. Read under stateMu: readLoop may have already applied a
+	// later activate to the shared session object.
+	r.stateMu.Lock()
+	activeRoles := sess.ActiveRoles
+	r.stateMu.Unlock()
+	if hasRole(activeRoles, "player") {
+		r.activatePlayer()
+	}
+	return nil
+}
+
+// activatePlayer finishes the connect once the player role is active: run the
+// initial clock-sync burst, then report available and push the player state. It
+// is idempotent and may be called either from Connect (initial activate) or
+// from readLoop (a later role/pairing activation).
+func (r *ReceiverV2) activatePlayer() {
+	r.stateMu.Lock()
+	if r.available {
+		r.stateMu.Unlock()
+		return
+	}
+	r.stateMu.Unlock()
 
 	// Per the spec a player sends its initial client/state only after clock
 	// synchronization is established, so the server's stream timestamps are
@@ -223,7 +315,116 @@ func (r *ReceiverV2) Connect() error {
 	r.available = true
 	r.volume = 100
 	r.stateMu.Unlock()
-	return r.sendPlayerState()
+	if err := r.sendPlayerState(); err != nil {
+		log.Printf("send player state: %v", err)
+	}
+}
+
+// defaultResolvePSK is the handshake PSK selector used when
+// V2Config.ResolvePSK is nil. It honours the persistent pairing store,
+// recording which category matched so the session layer can judge the activate
+// at the right trust level (long-term when a record matched; Sentinel
+// otherwise, which lets an unpaired server open a dynamic pairing-code
+// session). A miss returns false and the handshake falls back to the Sentinel
+// PSK.
+func (r *ReceiverV2) defaultResolvePSK(pskID string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
+	r.stateMu.Lock()
+	r.matchedCat = session.PSKSentinel
+	r.stateMu.Unlock()
+	if r.config.Store != nil {
+		if psk, ok := r.config.Store.LookupPSK(pskID); ok {
+			r.stateMu.Lock()
+			r.matchedCat = session.PSKLongTerm
+			r.stateMu.Unlock()
+			return psk, true
+		}
+	}
+	return secure.PSK{}, false
+}
+
+// pairIfRequested completes pairing when the server's initial activate
+// declared a pairing activity (which, per the spec, empties active_roles). It
+// runs the dynamic pairing-code flow, persists the resulting long-term PSK,
+// and returns the promoted session — which carries the player role. When the
+// activate did not declare pairing, the missing player role is reported as a
+// normal connect error.
+func (r *ReceiverV2) pairIfRequested(sess *session.ClientSession, hello session.ClientHello) (*session.ClientSession, error) {
+	if sess.Activate.Pairing == nil {
+		// The server granted no roles and did not ask to pair. Include what it
+		// declared so an unexpected server behaviour (e.g. a server that wants
+		// a pairing method we no longer advertise) is diagnosable.
+		return nil, fmt.Errorf("server activated no player role and did not request pairing (activities=%v, active_roles=%v); torque supports only the dynamic_pairing_code method and requires pairing", sess.Activate.Activities, sess.ActiveRoles)
+	}
+	if r.config.Store == nil {
+		return nil, fmt.Errorf("server requested pairing (method=%s) but no Store is configured", sess.Activate.Pairing.Method)
+	}
+	if sess.Activate.Pairing.Method != session.PairMethodDynamicPairingCode {
+		return nil, fmt.Errorf("server requested %q pairing; only dynamic_pairing_code is supported (this server may need a pairing method that was removed)", sess.Activate.Pairing.Method)
+	}
+	return r.pairPIN(sess, hello, r.nextPairingIndex())
+}
+
+// pairPIN runs the dynamic pairing-code (PIN) flow, which authenticates the
+// connection without a token (the code is the shared secret): it derives and
+// surfaces a code for the operator to enter on the server, then mints and
+// persists a long-term PSK.
+func (r *ReceiverV2) pairPIN(sess *session.ClientSession, hello session.ClientHello, pairingIndex int) (*session.ClientSession, error) {
+	// The pairing flow reads the connection directly (it runs on the single
+	// readLoop goroutine). Mark it active so clockSyncLoop withholds bursts
+	// that would otherwise inject server/time frames into the pairing stream.
+	r.pairingActive.Store(true)
+	defer r.pairingActive.Store(false)
+
+	p := sess.Activate.Pairing
+	format := ""
+	if p.Format != nil {
+		format = string(*p.Format)
+	}
+	emit := r.config.PairingCodeEmitted
+	if emit == nil {
+		emit = func(code string) {
+			log.Printf("pairing code: %s (enter it on the server within the window)", code)
+		}
+	}
+	cfg := session.PINPairingClientConfig{
+		Method:         string(session.PairMethodDynamicPairingCode),
+		PairingIndex:   uint32(pairingIndex),
+		Format:         format,
+		EmitCode:       emit,
+		NewPSK:         func() (secure.PSK, error) { return secure.NewPSK() },
+		Persist:        func(_ string, psk secure.PSK) error { return r.config.Store.PutRecord(psk) },
+		ResultingHello: hello,
+	}
+	after, err := sess.RunPINPairing(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%s pairing flow: %w", p.Method, err)
+	}
+	return r.finishPairing(after)
+}
+
+// finishPairing verifies the promoted session activated the player role and
+// records that this connection paired.
+func (r *ReceiverV2) finishPairing(after *session.ClientSession) (*session.ClientSession, error) {
+	if !hasRole(after.ActiveRoles, "player") {
+		return nil, fmt.Errorf("post-pairing session did not activate the player role (active_roles=%v)", after.ActiveRoles)
+	}
+	r.stateMu.Lock()
+	r.paired = true
+	r.stateMu.Unlock()
+	log.Printf("paired with %s", after.ServerName)
+	return after, nil
+}
+
+// nextPairingIndex consumes and returns the pairing index for the next pairing
+// activation. The first pairing activate since the handshake (even when not the
+// first overall activate) gets index 1; each subsequent pairing activate takes
+// the next value, matching the server's own per-handshake count.
+func (r *ReceiverV2) nextPairingIndex() int {
+	r.stateMu.Lock()
+	r.pairingIndex++
+	idx := r.pairingIndex
+	r.stateMu.Unlock()
+	return idx
 }
 
 // syncUntilReady runs clock-sync bursts until the time filter has produced at
@@ -237,7 +438,7 @@ func (r *ReceiverV2) syncUntilReady(timeout time.Duration) {
 			return
 		}
 		if time.Now().After(deadline) {
-			log.Printf("V2 initial clock sync timed out; streaming with an unsynced filter")
+			log.Printf("initial clock sync timed out; streaming with an unsynced filter")
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -260,10 +461,26 @@ func (r *ReceiverV2) buildHello() (session.ClientHello, session.PSKCategory) {
 			SupportedFormats: formats,
 			BufferCapacity:   r.config.BufferCapacity,
 		},
-		SupportedPairMethods: session.SupportedPairMethods{string(session.PairMethodPairingPSK): {}},
-		UnpairedAccess:       session.UnpairedAccess{Enabled: r.config.UnpairedAccess},
+		SupportedPairMethods: session.SupportedPairMethods{
+			string(session.PairMethodDynamicPairingCode): {
+				// Per spec a dynamic_pairing_code descriptor is only
+				// recognized when it declares both out_channels and formats.
+				// torque conveys the pairing code on screen (display) for the
+				// operator to enter; it emits it as decimal digits.
+				OutChannels: []string{"display"},
+				Formats:     []string{string(session.PairingFormatDigits)},
+			},
+		},
+		UnpairedAccess: session.UnpairedAccess{Enabled: false},
 	}
 	cat := r.config.PSKCategory
+	r.stateMu.Lock()
+	if r.matchedCat != 0 {
+		// Prefer the category the handshake resolver actually selected
+		// (long-term when a pairing record matched, Sentinel otherwise).
+		cat = r.matchedCat
+	}
+	r.stateMu.Unlock()
 	if cat == 0 {
 		// Default to long-term trust only when a pairing record matched the
 		// handshake; otherwise the sentinel.
@@ -320,6 +537,18 @@ func hasRole(roles []string, family string) bool {
 	return false
 }
 
+// pairingMethodName renders the server's requested pairing method (or "(none)"
+// when the activate declared no pairing) for diagnostics.
+func pairingMethodName(p *session.Pairing) string {
+	if p == nil {
+		return "(none)"
+	}
+	if p.Format != nil {
+		return fmt.Sprintf("%s/%s", p.Method, *p.Format)
+	}
+	return string(p.Method)
+}
+
 // SetVolume stores a local volume change and reports it to the server via
 // client/state (the server merges it into the group volume). Muted volume
 // changes are folded in but the mute bit stays set, per spec.
@@ -344,6 +573,17 @@ func (r *ReceiverV2) SetMuted(muted bool) {
 	_ = r.sendPlayerState()
 }
 
+// PlayerCmd constants above; this is the server→player command verbs this
+// receiver truthfully handles, advertised in every player state so the server
+// enables those controls (spec: volume only applies when "volume" is in
+// supported_commands; a player advertising none reads as having no volume
+// control, so HA shows 0).
+var v2PlayerSupportedCommands = []string{
+	string(session.PlayerCmdVolume),
+	string(session.PlayerCmdMute),
+	string(session.PlayerCmdSetOutputDelay),
+}
+
 // sendPlayerState reports the player's full state (available, volume, mute,
 // timing) — the spec requires `available` on every client/state.
 func (r *ReceiverV2) sendPlayerState() error {
@@ -361,10 +601,11 @@ func (r *ReceiverV2) sendPlayerState() error {
 	state := session.ClientState{
 		Available: avail,
 		Player: &session.ClientPlayerState{
-			OutputDelayMs: &od,
-			MinBufferMs:   ptr(minb),
-			Volume:        &vol,
-			Muted:         &mut,
+			OutputDelayMs:     &od,
+			MinBufferMs:       ptr(minb),
+			Volume:            &vol,
+			Muted:             &mut,
+			SupportedCommands: v2PlayerSupportedCommands,
 		},
 	}
 	raw, err := session.Marshal(&state)
@@ -384,7 +625,7 @@ func (r *ReceiverV2) readLoop() {
 	for {
 		msgType, payload, err := r.conn.ReadMessage()
 		if err != nil {
-			log.Printf("V2 read error: %v", err)
+			log.Printf("read error: %v", err)
 			return
 		}
 		switch msgType {
@@ -401,7 +642,7 @@ func (r *ReceiverV2) readLoop() {
 func (r *ReceiverV2) handleControl(payload []byte) {
 	msg, err := session.Parse(payload)
 	if err != nil {
-		log.Printf("V2 parse control error: %v", err)
+		log.Printf("parse control error: %v", err)
 		return
 	}
 	switch v := msg.(type) {
@@ -425,9 +666,11 @@ func (r *ReceiverV2) handleControl(payload []byte) {
 			r.config.OnCommand(*v.Player)
 		}
 	case *session.GroupUpdate:
-		log.Printf("V2 group update: %s (%s)", v.GroupName, v.PlaybackState)
+		log.Printf("group update: %s (%s)", v.GroupName, v.PlaybackState)
+	case *session.ServerActivate:
+		r.handleServerActivate(v)
 	case *session.ServerUnpair:
-		log.Printf("V2 server unpairing this client")
+		log.Printf("server unpairing this client")
 		if r.config.OnUnpair != nil {
 			r.config.OnUnpair()
 		}
@@ -436,7 +679,50 @@ func (r *ReceiverV2) handleControl(payload []byte) {
 	}
 }
 
-// handleStreamStart opens a decoder + scheduler for the negotiated format.
+// handleServerActivate processes a server/activate received after the initial
+// one: it keeps the live session in sync, reacts to a pairing request the
+// server drives later (dynamic pairing-code), and goes available once the
+// player role activates. Servers like Home Assistant often hold an unpaired
+// connection at empty activities and only afterwards drive pairing or roles.
+func (r *ReceiverV2) handleServerActivate(act *session.ServerActivate) {
+	r.stateMu.Lock()
+	r.sess.Activate = *act
+	roles := r.sess.ActiveRoles
+	if act.ActiveRoles != nil {
+		roles = *act.ActiveRoles
+	}
+	hello := r.hello
+	r.stateMu.Unlock()
+
+	if act.Pairing != nil {
+		// The server now asks us to pair. This temporarily uses the connection
+		// for the pairing exchange, then resumes normal reading.
+		after, err := r.pairIfRequested(r.sess, hello)
+		if err != nil {
+			log.Printf("pairing failed after a later activate: %v", err)
+			return // keep the connection; the server may drive another attempt
+		}
+		r.stateMu.Lock()
+		r.sess = after
+		roles = after.ActiveRoles
+		r.stateMu.Unlock()
+	} else {
+		r.stateMu.Lock()
+		r.sess.ActiveRoles = roles
+		r.stateMu.Unlock()
+	}
+
+	if hasRole(roles, "player") {
+		// Run activation off the readLoop goroutine: activatePlayer performs
+		// the initial clock-sync burst, which needs readLoop to keep draining
+		// server/time replies into timeSyncResp. Running it inline here would
+		// deadlock the burst (the only reader is busy running it), so every
+		// probe would time out. On the initial Connect path activation runs on
+		// the caller goroutine, which is fine because that goroutine isn't the
+		// reader.
+		go r.activatePlayer()
+	}
+}
 func (r *ReceiverV2) handleStreamStart(sp session.StreamStartPlayer) {
 	format := audio.Format{
 		Codec:      sp.Codec,
@@ -591,6 +877,14 @@ func (r *ReceiverV2) handleServerState(st *session.ServerState) {
 // runTimeSyncBurst drives a sequential burst of client/time probes and feeds
 // the lowest-RTT sample into the time filter, per the spec.
 func (r *ReceiverV2) runTimeSyncBurst(size int) {
+	// Only one burst at a time (see syncBurstMu). The periodic clockSyncLoop
+	// keeps the filter fresh in steady state, so a concurrent caller that loses
+	// the lock can safely skip its own burst.
+	if !r.syncBurstMu.TryLock() {
+		return
+	}
+	defer r.syncBurstMu.Unlock()
+
 drain:
 	for {
 		select {
@@ -609,11 +903,11 @@ drain:
 		t1 := time.Now().UnixMicro()
 		raw, err := session.Marshal(&session.ClientTime{ClientTransmitted: t1})
 		if err != nil {
-			log.Printf("V2 sync marshal: %v", err)
+			log.Printf("sync marshal: %v", err)
 			continue
 		}
 		if err := r.conn.WriteMessage(secure.MsgTypeJSON, raw); err != nil {
-			log.Printf("V2 sync send %d/%d failed: %v", i+1, size, err)
+			log.Printf("sync send %d/%d failed: %v", i+1, size, err)
 			continue
 		}
 		select {
@@ -629,7 +923,7 @@ drain:
 			}
 			valid++
 		case <-time.After(500 * time.Millisecond):
-			log.Printf("V2 sync sample %d/%d timed out", i+1, size)
+			log.Printf("sync sample %d/%d timed out", i+1, size)
 		case <-r.ctx.Done():
 			return
 		}
@@ -646,7 +940,12 @@ func (r *ReceiverV2) clockSyncLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			r.runTimeSyncBurst(V2TimeSyncBurstSize)
+			// Withhold bursts while a pairing flow owns the connection so its
+			// server/time replies don't collide with pairing messages (which
+			// are read directly from the stream).
+			if !r.pairingActive.Load() {
+				r.runTimeSyncBurst(V2TimeSyncBurstSize)
+			}
 		case <-r.ctx.Done():
 			return
 		}
@@ -759,7 +1058,7 @@ func (r *ReceiverV2) notify(err error) {
 	if r.config.OnError != nil {
 		r.config.OnError(err)
 	} else {
-		log.Printf("V2 client: %v", err)
+		log.Printf("client: %v", err)
 	}
 }
 

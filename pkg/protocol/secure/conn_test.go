@@ -4,6 +4,7 @@ package secure
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -333,5 +334,62 @@ func TestConn_TextFrameInTransportModeFails(t *testing.T) {
 	defer conn.Close()
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Fatal("text frame in transport mode accepted")
+	}
+}
+
+// TestConn_WriteSurvivesHandshakeTimeout guards the clearing of the handshake's
+// write deadline. The preamble sets a per-message write deadline equal to the
+// handshake timeout; if it is left in place after transport mode starts, every
+// later write silently fails with an i/o timeout once it lapses (invalidating
+// all long-lived outbound traffic — pairing, state, stream data) while the read
+// side sees no error and so never reconnects. A message written well past that
+// deadline must still be delivered.
+func TestConn_WriteSurvivesHandshakeTimeout(t *testing.T) {
+	serverID, _ := GenerateIdentity()
+	clientID, _ := GenerateIdentity()
+
+	const shortTO = 50 * time.Millisecond
+
+	srvDone := make(chan error, 1)
+	srv := startLoopbackServer(t, ServerHandshakeConfig{
+		Identity:         serverID,
+		HandshakeTimeout: shortTO,
+	}, func(conn *Conn, _ ClientInit) {
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			srvDone <- err
+			return
+		}
+		if msgType != MsgTypeJSON || !bytes.Contains(payload, []byte("post-timeout")) {
+			srvDone <- fmt.Errorf("unexpected post-timeout message: type=%d payload=%q", msgType, payload)
+			return
+		}
+		srvDone <- nil
+	})
+
+	conn, _, err := dial(t, srv, ClientHandshakeConfig{
+		Identity:         clientID,
+		HandshakeTimeout: shortTO,
+	})
+	if err != nil {
+		t.Fatalf("client handshake: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait comfortably past the handshake write deadline: a stale deadline would
+	// make this write fail immediately with an i/o timeout.
+	time.Sleep(shortTO * 5)
+
+	if err := conn.WriteJSON(map[string]any{"type": "client/ping", "payload": map[string]any{"tag": "post-timeout"}}); err != nil {
+		t.Fatalf("write after handshake deadline lapsed failed (stale write deadline still set?): %v", err)
+	}
+
+	select {
+	case err := <-srvDone:
+		if err != nil {
+			t.Fatalf("server: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never received the post-timeout message")
 	}
 }

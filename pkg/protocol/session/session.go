@@ -364,12 +364,26 @@ func writeMessage(conn *secure.Conn, v any) error {
 // readControl reads the next JSON control message and parses it. Non-JSON
 // binary frames during establishment are protocol violations.
 func readControl(conn *secure.Conn) (any, error) {
-	msgType, payload, err := conn.ReadMessage()
-	if err != nil {
-		return nil, err
+	for {
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			return nil, err
+		}
+		if msgType != secure.MsgTypeJSON {
+			return nil, fmt.Errorf("binary message type %d before session establishment", msgType)
+		}
+		msg, err := Parse(payload)
+		if err != nil {
+			return nil, err
+		}
+		// server/time is an asynchronous, informational message that may
+		// arrive at any point (a reply to a clock-sync probe), and during
+		// pairing/establishment the reading side owns the stream. It is not a
+		// protocol state event here, so skip it rather than surfacing it as
+		// "expected X, got *ServerTime".
+		if _, ok := msg.(*ServerTime); ok {
+			continue
+		}
+		return msg, nil
 	}
-	if msgType != secure.MsgTypeJSON {
-		return nil, fmt.Errorf("binary message type %d before session establishment", msgType)
-	}
-	return Parse(payload)
 }
