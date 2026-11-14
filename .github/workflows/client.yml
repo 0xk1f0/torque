@@ -79,15 +79,19 @@ jobs:
             cgo_cflags: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard
             expect_cpu: v7
           # Pi 1 / Pi Zero / Pi Zero W — cross gnueabihf, armv6 C code.
-          # -marm: Ubuntu's armhf gcc defaults to Thumb-2, which armv6 lacks.
+          # Mirrors the Dockerfile's armv6 recipe (-march=armv6 hard-float, GOARM=6).
+          # Note: no expect_cpu here — like the Dockerfile, we trust -march rather
+          # than assert Tag_CPU_arch, because this cell links Ubuntu's armhf
+          # (armv7-baseline) crt/libgcc, which bumps the ELF tag to v7. Genuine
+          # armv6 runtime compatibility needs an armv6 userspace (Raspbian).
           - name: linux-armv6
             goarch: arm
             goarm: "6"
             cc: arm-linux-gnueabihf-gcc
             dpkg_arch: armhf
             triplet: arm-linux-gnueabihf
-            cgo_cflags: -march=armv6 -marm -mfpu=vfp -mfloat-abi=hard
-            expect_cpu: v6
+            cgo_cflags: -march=armv6 -mfpu=vfp -mfloat-abi=hard
+            expect_cpu: ""
 
     steps:
     - uses: actions/checkout@v4
