@@ -10,8 +10,8 @@ synchronized audio. Client-only fork of
 Requires Go ≥ 1.27, `pkg-config`, `libopus`, and ALSA on Linux.
 
 ```bash
-make            # builds ./torque
-make test       # go test ./...
+go build -o torque ./cmd/torque
+go test ./...
 ```
 
 Cross-build all Raspberry Pi architectures + x86_64. The `golang` base image has
@@ -75,8 +75,12 @@ later runs connect already paired. Unpaired access is not supported.
 ## Service
 
 ```bash
-make install-daemon   # install + enable systemd unit, configure /etc/default/torque
+sudo install -m 644 scripts/systemd/torque.service /etc/systemd/system/
+sudo install -m 644 scripts/systemd/torque.env /etc/default/torque
+sudo systemctl daemon-reload && sudo systemctl enable --now torque
 ```
+
+Configure the server and options in `/etc/default/torque`.
 
 ## License
 
