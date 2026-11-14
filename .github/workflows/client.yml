@@ -129,7 +129,13 @@ jobs:
           | sudo tee /etc/apt/sources.list.d/ports.sources >/dev/null
         sudo dpkg --add-architecture ${{ matrix.dpkg_arch }}
         sudo apt-get update
-        sudo apt-get install -y gcc-${{ matrix.triplet }} binutils-${{ matrix.triplet }} \
+        # --allow-downgrades: the runner's preinstalled host binutils/gcc/cross
+        # basemeta may be newer than what the mirror serves for this (currently
+        # 26.04 "resolute") release, so adding the foreign arch makes apt want
+        # to downgrade them. Those host packages are unused in a cross cell
+        # (the cross gcc builds the target), so applying the downgrade is safe.
+        sudo apt-get install -y --allow-downgrades \
+          gcc-${{ matrix.triplet }} binutils-${{ matrix.triplet }} \
           libopus-dev:${{ matrix.dpkg_arch }} libasound2-dev:${{ matrix.dpkg_arch }}
 
     - name: Get version
