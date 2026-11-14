@@ -1,13 +1,6 @@
-# ABOUTME: Builds the encrypted Sendspin client (torque) for every
-# ABOUTME: Raspberry Pi architecture plus desktop x86_64, including armv6 for
-# ABOUTME: Pi 1 / Zero / Zero W. All cells cross-compile on a single runner.
-name: torque (Raspberry Pi)
+name: Build all Targets
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 # Same tag as the other workflows: skip the libopusfile parts of

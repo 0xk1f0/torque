@@ -1,11 +1,10 @@
-# ABOUTME: CI for the Sendspin client — tests, vet, and lint on push/PR
-name: CI
+name: Test
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
 
 # Drop the libopusfile parts of gopkg.in/hraban/opus.v2; the client never
 # calls the opus.Stream API, and the tag avoids libopusfile at runtime.
