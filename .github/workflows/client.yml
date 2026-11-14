@@ -56,33 +56,38 @@ jobs:
             goarch: amd64
             goarm: ""
             cc: ""
-            pkgconfig: ""
+            dpkg_arch: ""
+            triplet: ""
             cgo_cflags: ""
-            deps: native
+            expect_cpu: ""
           # 64-bit Pi OS (Pi 3/4/5, Zero 2 W) — cross aarch64.
           - name: linux-arm64
             goarch: arm64
             goarm: ""
             cc: aarch64-linux-gnu-gcc
-            pkgconfig: /usr/lib/aarch64-linux-gnu/pkgconfig
+            dpkg_arch: arm64
+            triplet: aarch64-linux-gnu
             cgo_cflags: ""
-            deps: aarch64
+            expect_cpu: ""
           # 32-bit Raspbian (Pi 2/3) — cross gnueabihf, armv7 C code.
           - name: linux-armv7
             goarch: arm
             goarm: "7"
             cc: arm-linux-gnueabihf-gcc
-            pkgconfig: /usr/lib/arm-linux-gnueabihf/pkgconfig
+            dpkg_arch: armhf
+            triplet: arm-linux-gnueabihf
             cgo_cflags: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard
-            deps: gnueabihf
+            expect_cpu: v7
           # Pi 1 / Pi Zero / Pi Zero W — cross gnueabihf, armv6 C code.
+          # -marm: Ubuntu's armhf gcc defaults to Thumb-2, which armv6 lacks.
           - name: linux-armv6
             goarch: arm
             goarm: "6"
             cc: arm-linux-gnueabihf-gcc
-            pkgconfig: /usr/lib/arm-linux-gnueabihf/pkgconfig
-            cgo_cflags: -march=armv6 -mfpu=vfp -mfloat-abi=hard
-            deps: gnueabihf
+            dpkg_arch: armhf
+            triplet: arm-linux-gnueabihf
+            cgo_cflags: -march=armv6 -marm -mfpu=vfp -mfloat-abi=hard
+            expect_cpu: v6
 
     steps:
     - uses: actions/checkout@v4
@@ -94,47 +99,75 @@ jobs:
         go-version: '1.27'
 
     - name: Install dependencies (native amd64)
-      if: matrix.deps == 'native'
+      if: matrix.dpkg_arch == ''
       run: |
         sudo apt-get update
         sudo apt-get install -y libopus-dev libasound2-dev
 
-    # Multiarch enables the cross gcc to find target libopus + ALSA headers/libs.
-    - name: Install cross toolchain + deps (aarch64)
-      if: matrix.deps == 'aarch64'
+    # Ubuntu serves arm64/armhf packages from ports.ubuntu.com, not the
+    # default (amd64-only) mirror. Pin the existing sources to amd64 and add a
+    # ports source, otherwise `apt-get update` 404s on the foreign arch.
+    - name: Install cross toolchain + deps (${{ matrix.dpkg_arch }})
+      if: matrix.dpkg_arch != ''
       run: |
-        sudo dpkg --add-architecture arm64
+        set -eu
+        codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+          sudo sed -i '/^Architectures:/d; /^Types:/a Architectures: amd64' \
+            /etc/apt/sources.list.d/ubuntu.sources
+        fi
+        if [ -f /etc/apt/sources.list ]; then
+          sudo sed -i 's/^deb \(http\)/deb [arch=amd64] \1/' /etc/apt/sources.list
+        fi
+        printf '%s\n' \
+          'Types: deb' \
+          'URIs: http://ports.ubuntu.com/ubuntu-ports' \
+          "Suites: ${codename} ${codename}-updates ${codename}-security" \
+          'Components: main universe' \
+          'Architectures: arm64 armhf' \
+          'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+          | sudo tee /etc/apt/sources.list.d/ports.sources >/dev/null
+        sudo dpkg --add-architecture ${{ matrix.dpkg_arch }}
         sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu libopus-dev:arm64 libasound2-dev:arm64
-
-    - name: Install cross toolchain + deps (armhf)
-      if: matrix.deps == 'gnueabihf'
-      run: |
-        sudo dpkg --add-architecture armhf
-        sudo apt-get update
-        sudo apt-get install -y gcc-arm-linux-gnueabihf libopus-dev:armhf libasound2-dev:armhf
+        sudo apt-get install -y gcc-${{ matrix.triplet }} binutils-${{ matrix.triplet }} \
+          libopus-dev:${{ matrix.dpkg_arch }} libasound2-dev:${{ matrix.dpkg_arch }}
 
     - name: Get version
       id: version
-      run: echo "VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> $GITHUB_OUTPUT
+      run: echo "VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> "$GITHUB_OUTPUT"
 
     - name: Build
       run: |
+        set -eu
         export CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }}
-        [ -n "${{ matrix.cc }}" ]         && export CC=${{ matrix.cc }}
-        [ -n "${{ matrix.pkgconfig }}" ]  && export PKG_CONFIG_PATH=${{ matrix.pkgconfig }}
-        [ -n "${{ matrix.cgo_cflags }}" ] && export CGO_CFLAGS="${{ matrix.cgo_cflags }}" CGO_LDFLAGS="${{ matrix.cgo_cflags }}"
+        if [ -n "${{ matrix.cc }}" ]; then
+          export CC=${{ matrix.cc }}
+          # LIBDIR (not PATH) so host .pc files can never leak into a cross build.
+          export PKG_CONFIG_LIBDIR=/usr/lib/${{ matrix.triplet }}/pkgconfig:/usr/share/pkgconfig
+        fi
+        if [ -n "${{ matrix.cgo_cflags }}" ]; then
+          export CGO_CFLAGS="${{ matrix.cgo_cflags }}" CGO_LDFLAGS="${{ matrix.cgo_cflags }}"
+        fi
         LDFLAGS="-X github.com/0xk1f0/torque/internal/version.Version=${{ steps.version.outputs.VERSION }} -s -w"
         go build -trimpath -ldflags "${LDFLAGS}" \
           -o torque-${{ matrix.name }} ./cmd/torque
 
     # Assert the produced ELF really is the advertised architecture — catches
     # the armv7-compiled-cgo-on-armv6 trap before it reaches a Zero W.
+    # Tag_CPU_arch is the max over every linked object, including the
+    # toolchain's crt files and libgcc, so a v7 result here is a real problem.
     - name: Verify architecture
       run: |
-        file torque-${{ matrix.name }}
-        if [ "${{ matrix.goarch }}" = "arm" ]; then
-          readelf -A torque-${{ matrix.name }} | grep -E "Tag_CPU_arch" || true
+        set -eu
+        bin=torque-${{ matrix.name }}
+        file "$bin"
+        if [ -n "${{ matrix.expect_cpu }}" ]; then
+          got=$(${{ matrix.triplet }}-readelf -A "$bin" | sed -n 's/^ *Tag_CPU_arch: *//p' | head -n1)
+          echo "Tag_CPU_arch: ${got:-<missing>} (expected ${{ matrix.expect_cpu }})"
+          case "$got" in
+            ${{ matrix.expect_cpu }}*) ;;
+            *) echo "::error::$bin is '${got:-unknown}', expected ${{ matrix.expect_cpu }}"; exit 1 ;;
+          esac
         fi
 
     - name: Upload sendspin client

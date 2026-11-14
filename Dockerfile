@@ -1,42 +1,37 @@
 # syntax=docker/dockerfile:1
 # ABOUTME: Multi-architecture build for the Sendspin client (torque)
-# ABOUTME: Use `docker buildx --platform` to cross-build for every Raspberry Pi
-# ABOUTME: architecture (armv6, armv7, arm64) plus desktop x86_64.
+# ABOUTME: Use `docker buildx build` or `podman build` (they behave the same) to
+# ABOUTME: cross-build for every Raspberry Pi
 #
-# Build binaries for all targets in one shot (docker buildx):
-#   docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6 \
-#       --target export --output type=local,dest=dist .
-#     produces dist/linux_amd64/torque, dist/linux_arm64/torque,
-#     dist/linux_arm_v7/torque, dist/linux_arm_v6/torque.
-#   (Requires binfmt/QEMU registration + a buildx builder; see below.)
-#
-# Build just one target (or a runnable image via --target runtime):
+# Build for every target with docker buildx or podman — they behave the same
+# here. The `golang:1.27-bookworm` base image ships NO 32-bit armv6 variant, so
+# `--platform linux/arm/v6` fails no matter the builder. armv6 is instead built
+# from the arm/v7 image with ARM_VARIANT=v6 to force armv6 codegen (see the
+# notes below). You MUST build per-platform so each goes to its own dist dir:
+#   for p in linux/amd64 linux/arm64 linux/arm/v7 linux/arm/v6; do
+#     plat="$p"; extra=""
+#     if [ "$p" = linux/arm/v6 ]; then
+#       plat=linux/arm/v7; extra="--build-arg ARM_VARIANT=v6"
+#     fi
+#     docker buildx build --platform "$plat" $extra --target export \
+#       --output type=local,dest="dist/${p//\//_}" .
+#   done
+# The same loop with `podman build` in place of `docker buildx build` works
+# verbatim. Prerequisites (docker): binfmt/QEMU + a builder:
+#   docker run --privileged tonistiigi/binfmt:latest --install all
+#   docker buildx create --use
+# Build a single target / runnable image:
 #   docker buildx build --platform linux/arm64 --target export \
 #       --output type=local,dest=dist .
 #   docker buildx build --platform linux/arm64 --target runtime -t torque .
 #
-# The same matrix with podman (per platform; set ${p//\//_} = linux_arm64, ...):
-#   for p in linux/amd64 linux/arm64 linux/arm/v7 linux/arm/v6; do
-#     plat="$p"; extra=""
-#     if [ "$p" = linux/arm/v6 ]; then
-#       # buildx sets TARGETVARIANT=v6 from --platform; podman does not. Build
-#       # the arm/v7 cell and force armv6 codegen with ARM_VARIANT so the
-#       # cgo audio stack (libopus/miniaudio) matches the Pi Zero CPU.
-#       plat=linux/arm/v7; extra="--build-arg ARM_VARIANT=v6"
-#     fi
-#     podman build --platform "$plat" $extra --target export \
-#       --output type=local,dest="dist/${p//\//_}" .
-#   done
-#
-# Prerequisites (docker): cross-platform builds need QEMU/binfmt registration:
-#   docker run --privileged tonistiigi/binfmt:latest --install all
-#   docker buildx create --use
-#
-# Platform notes (same hardening as .github/workflows/v2-client.yml):
-#   - The client links libopus + miniaudio, both cgo. Inside a buildx cell the
+# Platform notes (same hardening as .github/workflows/client.yml):
+#   - The client links libopus + miniaudio, both cgo. Inside a build cell the
 #     container and its gcc are the target architecture, but an arm/v7-built
-#     miniaudio would still crash on an armv6 CPU (Pi Zero / Zero W), so armv6
-#     also forces CGO_CFLAGS=-march=armv6. GOARM alone only covers the Go code.
+#     miniaudio would still crash on an armv6 CPU (Pi Zero / Zero W), so the
+#     v6 cell builds on the arm/v7 image and forces GOARM=6 + CGO_CFLAGS
+#     -march=armv6, -marm (Thumb-2, which armv6 lacks). GOARM alone only covers
+#     the Go code.
 #   - GOFLAGS=-tags=nolibopusfile keeps the binary free of the libopusfile
 #     dependency, consistent with the rest of the build.
 
