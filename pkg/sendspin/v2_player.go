@@ -246,7 +246,7 @@ func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
 			}
 		}
 		recv, err := NewReceiverV2(cfg2)
-		if err == nil {
+		if err == nil && recv != nil {
 			if err = recv.Connect(); err == nil {
 				log.Printf("reconnect: connected to %s on attempt %d", cfg2.ServerAddr, attempt)
 				return recv, true

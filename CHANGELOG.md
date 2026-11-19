@@ -37,6 +37,9 @@ Forked and reworked as **client-only** — the encrypted Sendspin client.
 - **Malgo output: drain the ring when a same-format stream reuses the device**,
   so residual samples from the previous track don't play at the head of the
   next one.
+- **Reconnect: guard against a nil recovered receiver** before calling Connect
+  in `reconnectWithBackoff`, so a future constructor error can never panic on a
+  nil dereference.
 
 ## [0.1.0] - 2026-11-10
 
