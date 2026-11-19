@@ -19,6 +19,13 @@ Forked and reworked as **client-only** — the encrypted Sendspin client.
   clock-sync RTT/quality/age (`server_lead=…, rtt=…, quality=…, sync_age=…`) so
   a future occurrence shows whether the timestamp mapping or the pipeline is at
   fault, and added a periodic 5s `Scheduler stats` line for the timeline.
+- **Decode moved off the network read loop.** `handleAudioChunk` used to decode
+  inline on the single `readLoop` goroutine; on constrained devices CPU-bound
+  codec work stalled network reads and starved `client/time` replies — a route
+  into the late-drop storms above. Raw chunks now go through a bounded
+  (128-entry ≈2.5s) FIFO to a dedicated decode worker, and each chunk carries a
+  stream generation so async-decoded audio from a superseded track is dropped
+  instead of bleeding into the new stream.
 
 ## [0.1.0] - 2026-11-10
 

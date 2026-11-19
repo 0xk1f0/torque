@@ -39,7 +39,22 @@ const (
 	// live connection stays fresh and loss is declared only for a genuinely dead
 	// server (30s with no client/time reply).
 	defaultV2SyncLossGrace = 30 * time.Second
+
+	// decodeQueueDepth bounds the raw-chunk pipeline between the read loop and
+	// the decode worker (~2.5s of 20ms chunks): reads pause only when decode
+	// falls that far behind, instead of stalling after every chunk.
+	decodeQueueDepth = 128
 )
+
+// decodeJob is one raw chunk queued for the decode worker. StreamGen ties it to
+// the stream generation that parsed it, so stale chunks are dropped on
+// stream/start.
+type decodeJob struct {
+	StreamGen uint64
+	Timestamp int64
+	Data      []byte
+	Format    audio.Format
+}
 
 // V2Config configures the spec-v2 client (ReceiverV2 / PlayerV2).
 type V2Config struct {
@@ -160,6 +175,13 @@ type ReceiverV2 struct {
 	output    chan audio.Buffer
 	syncLost  atomic.Bool
 	connected atomic.Bool
+
+	// decodeCh queues raw chunks for the decode worker, keeping codec CPU work
+	// off the read loop. Bounded by decodeQueueDepth.
+	decodeCh chan decodeJob
+	// streamGen counts stream/start generations: async-decoded chunks are
+	// scheduled only if their generation still matches the active stream.
+	streamGen uint64
 	// pairingActive is true while a PIN pairing flow has exclusive use of the
 	// connection (it runs on the single readLoop goroutine and reads frames
 	// directly). While set, clockSyncLoop withholds new bursts so their
@@ -201,6 +223,7 @@ func NewReceiverV2(cfg V2Config) (*ReceiverV2, error) {
 		cancel:       cancel,
 		timeSyncResp: make(chan session.ServerTime, 16),
 		output:       make(chan audio.Buffer, 10),
+		decodeCh:     make(chan decodeJob, decodeQueueDepth),
 	}, nil
 }
 
@@ -277,6 +300,7 @@ func (r *ReceiverV2) Connect() error {
 	// Start the reader first so server/time replies are drained while the
 	// initial clock-sync burst is in flight.
 	go r.readLoop()
+	go r.decodeLoop()
 	go r.clockSyncLoop()
 	go r.watchClockSync()
 
@@ -763,6 +787,9 @@ func (r *ReceiverV2) handleStreamStart(sp session.StreamStartPlayer) {
 	}
 	oldScheduler := r.scheduler
 	oldCancel := r.schedulerCancel
+	// A new stream generation: chunks queued from the previous stream must not
+	// be scheduled into this one.
+	r.streamGen++
 	r.scheduler = newScheduler
 	r.schedulerCancel = newCancel
 	r.decoder = decoder
@@ -802,9 +829,8 @@ func (r *ReceiverV2) handleStreamEnd() {
 	r.stopStream()
 }
 
-// handleAudioChunk decodes one player-audio message body (12-byte header
-// after the type byte) and schedules it. send_ahead carries no scheduling
-// meaning — it is only a delay sample, so it is parsed and ignored.
+// handleAudioChunk parses the player-audio header and queues the raw chunk for
+// decodeLoop, so codec work never stalls network reads or client/time replies.
 func (r *ReceiverV2) handleAudioChunk(body []byte) {
 	ts, _, audioData, err := playback.ParseAudioChunk(body)
 	if err != nil {
@@ -813,15 +839,47 @@ func (r *ReceiverV2) handleAudioChunk(body []byte) {
 	}
 
 	r.streamMu.Lock()
-	decoder := r.decoder
-	sched := r.scheduler
-	format := r.format
-	r.streamMu.Unlock()
-	if decoder == nil || sched == nil {
+	if r.decoder == nil || r.scheduler == nil {
+		r.streamMu.Unlock()
 		return
 	}
+	gen := r.streamGen
+	format := r.format
+	r.streamMu.Unlock()
 
-	pcm, err := decoder.Decode(audioData)
+	job := decodeJob{StreamGen: gen, Timestamp: ts, Data: audioData, Format: format}
+	select {
+	case r.decodeCh <- job:
+	case <-r.ctx.Done():
+	}
+}
+
+// decodeLoop is the single FIFO decode worker: preserves chunk ordering and
+// keeps all codec CPU work off the read loop.
+func (r *ReceiverV2) decodeLoop() {
+	for {
+		select {
+		case job := <-r.decodeCh:
+			r.decodeAndSchedule(job)
+		case <-r.ctx.Done():
+			return
+		}
+	}
+}
+
+// decodeAndSchedule decodes one raw chunk and schedules the result, guarded so
+// a chunk from a superseded stream is never injected into the active one.
+func (r *ReceiverV2) decodeAndSchedule(job decodeJob) {
+	r.streamMu.Lock()
+	if job.StreamGen != r.streamGen || r.decoder == nil || r.scheduler == nil {
+		r.streamMu.Unlock()
+		return
+	}
+	decoder := r.decoder
+	sched := r.scheduler
+	r.streamMu.Unlock()
+
+	pcm, err := decoder.Decode(job.Data)
 	if err != nil {
 		r.notify(fmt.Errorf("v2: decode error: %w", err))
 		return
@@ -829,7 +887,15 @@ func (r *ReceiverV2) handleAudioChunk(body []byte) {
 	if len(pcm) == 0 {
 		return
 	}
-	sched.Schedule(audio.Buffer{Timestamp: ts, Samples: pcm, Format: format})
+	// A stream may have started or stopped while we decoded; reschedule into
+	// the scheduler we validated (skip if it has been replaced).
+	r.streamMu.Lock()
+	if job.StreamGen != r.streamGen || r.scheduler != sched {
+		r.streamMu.Unlock()
+		return
+	}
+	r.streamMu.Unlock()
+	sched.Schedule(audio.Buffer{Timestamp: job.Timestamp, Samples: pcm, Format: job.Format})
 }
 
 func (r *ReceiverV2) handleServerState(st *session.ServerState) {
