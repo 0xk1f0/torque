@@ -4,6 +4,7 @@ package secure
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 type loopbackResult struct {
@@ -56,29 +57,28 @@ func TestServerError_Classification(t *testing.T) {
 // (cleartext, then close) when client/init is rejected, per failure handling.
 func TestConn_ServerSendsErrorOnBadInit(t *testing.T) {
 	serverID, _ := GenerateIdentity()
-	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, _ := upgrader.Upgrade(w, r, nil)
+		ws, _ := websocket.Accept(w, r, nil)
 		_, _, _ = ServerHandshake(ws, ServerHandshakeConfig{Identity: serverID})
-		ws.Close()
+		ws.Close(websocket.StatusNormalClosure, "")
 	}))
 	defer srv.Close()
 
-	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	ws, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ws.Close()
+	defer ws.Close(websocket.StatusNormalClosure, "")
 
 	bad := `{"type":"client/init","payload":{"client_id":"x","version":2,"suite":"25519_ChaChaPoly_SHA256"}}`
-	if err := ws.WriteMessage(websocket.TextMessage, []byte(bad)); err != nil {
+	if err := ws.Write(context.Background(), websocket.MessageText, []byte(bad)); err != nil {
 		t.Fatal(err)
 	}
-	mt, data, err := ws.ReadMessage()
+	mt, data, err := ws.Read(context.Background())
 	if err != nil {
 		t.Fatalf("read server/error: %v", err)
 	}
-	if mt != websocket.TextMessage {
+	if mt != websocket.MessageText {
 		t.Fatalf("server/error must be a text frame, got %d", mt)
 	}
 	if !strings.Contains(string(data), `"unsupported_version"`) {
@@ -90,11 +90,10 @@ func TestConn_ServerSendsErrorOnBadInit(t *testing.T) {
 // server side of the preamble and hands the resulting Conn to the callback.
 func startLoopbackServer(t *testing.T, cfg ServerHandshakeConfig, serve func(*Conn, ClientInit)) *httptest.Server {
 	t.Helper()
-	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
-			t.Errorf("upgrade: %v", err)
+			t.Errorf("accept: %v", err)
 			return
 		}
 		conn, ci, err := ServerHandshake(ws, cfg)
@@ -113,7 +112,7 @@ func wsURL(srv *httptest.Server) string {
 
 func dial(t *testing.T, srv *httptest.Server, cfg ClientHandshakeConfig) (*Conn, ServerInit, error) {
 	t.Helper()
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL(srv), nil)
+	ws, _, err := websocket.Dial(context.Background(), wsURL(srv), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -287,19 +286,18 @@ func TestResponder_SentinelFallback(t *testing.T) {
 
 func TestConn_HandshakeTimeout(t *testing.T) {
 	// A server that upgrades but never speaks.
-	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
 		time.Sleep(5 * time.Second)
-		ws.Close()
+		ws.Close(websocket.StatusNormalClosure, "")
 	}))
 	defer srv.Close()
 
 	clientID, _ := GenerateIdentity()
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL(srv), nil)
+	ws, _, err := websocket.Dial(context.Background(), wsURL(srv), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -322,7 +320,7 @@ func TestConn_TextFrameInTransportModeFails(t *testing.T) {
 
 	srv := startLoopbackServer(t, ServerHandshakeConfig{Identity: serverID}, func(conn *Conn, _ ClientInit) {
 		// Violate the spec: send a text frame after transport mode.
-		conn.ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"oops"}`))
+		conn.ws.Write(context.Background(), websocket.MessageText, []byte(`{"type":"oops"}`))
 		time.Sleep(200 * time.Millisecond)
 		conn.Close()
 	})

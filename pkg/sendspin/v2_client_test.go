@@ -15,7 +15,7 @@ import (
 	"github.com/0xk1f0/torque/pkg/protocol/secure"
 	"github.com/0xk1f0/torque/pkg/protocol/session"
 	syncc "github.com/0xk1f0/torque/pkg/sync"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 	"slices"
 )
 
@@ -38,7 +38,6 @@ func newV2TestPeer(t *testing.T, longTerm secure.PSK, onAvailable func()) *v2Tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	upgrader := websocket.Upgrader{}
 	start := time.Now()
 	clock := func() int64 { return time.Since(start).Microseconds() }
 
@@ -46,7 +45,7 @@ func newV2TestPeer(t *testing.T, longTerm secure.PSK, onAvailable func()) *v2Tes
 		if strings.HasPrefix(r.Header.Get("Origin"), "http") {
 			t.Errorf("server accepted an Origin header; spec forbids it")
 		}
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -385,11 +384,10 @@ func TestV2Client_HelloOffersSpecValidDynamicPairing(t *testing.T) {
 // server/activate.
 func TestReceiverV2_EmptyActivateStaysConnected(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
-	upgrader := websocket.Upgrader{}
 	clientDone := make(chan struct{})
 
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -559,9 +557,8 @@ func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
 	supported := make(chan []string, 1)
 	serverID, _ := secure.GenerateIdentity()
 	clock := func() int64 { return 0 }
-	upgrader := websocket.Upgrader{}
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -669,9 +666,8 @@ func TestReceiverV2_LaterActivateSyncsClock(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
 	start := time.Now()
 	clock := func() int64 { return time.Since(start).Microseconds() }
-	upgrader := websocket.Upgrader{}
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}

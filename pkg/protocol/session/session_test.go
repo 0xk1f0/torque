@@ -3,6 +3,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/0xk1f0/torque/pkg/protocol/secure"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 func TestMarshal_WireShapes(t *testing.T) {
@@ -100,9 +101,8 @@ func TestParse_RegistryAndUnknown(t *testing.T) {
 // server-side handshake with the given PSK selector, delivering Conns on ch.
 func startSecureLoopback(t *testing.T, serverID *secure.Identity, selectPSK func(string) (secure.PSK, secure.PSKCategoryCode, error), ch chan<- *secure.Conn) *httptest.Server {
 	t.Helper()
-	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -120,7 +120,7 @@ func startSecureLoopback(t *testing.T, serverID *secure.Identity, selectPSK func
 // dialSecure dials the loopback server and completes the client handshake.
 func dialSecure(t *testing.T, srv *httptest.Server, clientID *secure.Identity, selectPSK func(string, secure.PSKCategoryCode) (secure.PSK, bool)) *secure.Conn {
 	t.Helper()
-	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	ws, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,7 +22,7 @@ import (
 	"github.com/0xk1f0/torque/pkg/protocol/secure"
 	"github.com/0xk1f0/torque/pkg/protocol/session"
 	"github.com/0xk1f0/torque/pkg/sync"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // V2TimeSyncBurstSize is the clock-sync burst size (spec: ≥8 per burst).
@@ -244,7 +244,7 @@ func (r *ReceiverV2) Connect() error {
 	u := url.URL{Scheme: "ws", Host: r.config.ServerAddr, Path: "/sendspin"}
 	log.Printf("connecting to %s", u.String())
 
-	ws, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	ws, _, err := websocket.Dial(r.ctx, u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", u.String(), err)
 	}
@@ -259,7 +259,7 @@ func (r *ReceiverV2) Connect() error {
 		SelectPSK:        resolve,
 	})
 	if err != nil {
-		ws.Close()
+		ws.Close(websocket.StatusNormalClosure, "")
 		return fmt.Errorf("noise handshake: %w", err)
 	}
 

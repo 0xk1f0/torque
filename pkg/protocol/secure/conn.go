@@ -3,12 +3,13 @@
 package secure
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // DefaultHandshakeTimeout bounds each expected message during the preamble,
@@ -29,6 +30,8 @@ type Conn struct {
 	reasm   *Reassembler
 	writeMu sync.Mutex
 	peerID  string
+	// ctx drives transport reads/writes (coder/websocket requires a context).
+	ctx context.Context
 
 	// Retained for in-band re-handshakes: client_id/server_id and suite
 	// carry over, and the new prologue is the prior handshake's hash.
@@ -61,7 +64,7 @@ type ServerHandshakeConfig struct {
 func ServerHandshake(ws *websocket.Conn, cfg ServerHandshakeConfig) (conn *Conn, ci ClientInit, err error) {
 	defer func() {
 		if err != nil {
-			ws.Close()
+			ws.Close(websocket.StatusNormalClosure, "")
 		}
 	}()
 	if cfg.Identity == nil {
@@ -183,7 +186,7 @@ type ClientHandshakeConfig struct {
 func ClientHandshake(ws *websocket.Conn, cfg ClientHandshakeConfig) (conn *Conn, si ServerInit, err error) {
 	defer func() {
 		if err != nil {
-			ws.Close()
+			ws.Close(websocket.StatusNormalClosure, "")
 		}
 	}()
 	if cfg.Identity == nil {
@@ -280,20 +283,20 @@ func ClientHandshake(ws *websocket.Conn, cfg ClientHandshakeConfig) (conn *Conn,
 func newConn(ws *websocket.Conn, sess *Session, peerID string, maxMessageSize int) *Conn {
 	// Transport frames are ciphertexts of at most maxNoiseMessage bytes.
 	ws.SetReadLimit(maxNoiseMessage + 1024)
-	ws.SetReadDeadline(time.Time{})
-	// The handshake left a write deadline behind (writeTextFrame sets one per
-	// handshake message). Leaving it in place would make every transport write
-	// fail with an i/o timeout once it lapses (~HandshakeTimeout after the last
-	// handshake write), silently killing all outbound traffic on a long-lived
-	// connection — the read loop sees no error, so it never reconnects. A
-	// streaming connection must carry no write deadline; liveness is handled by
-	// the read side.
-	ws.SetWriteDeadline(time.Time{})
+	// coder/websocket derives per-message timeouts from the context passed to
+	// Read/Write — there are no SetReadDeadline/SetWriteDeadline methods, and a
+	// context that fires closes the connection. The handshake helper uses a
+	// deadline-bound context per frame (readTextFrame/writeTextFrame); transport
+	// mode must carry none, or the handshake timeout would leak into every
+	// streaming write and silently kill long-lived connections. c.ctx is
+	// deadline-free, so transport reads/writes are never timed out; liveness is
+	// handled by the read side.
 	return &Conn{
 		ws:     ws,
 		sess:   sess,
 		reasm:  NewReassembler(maxMessageSize),
 		peerID: peerID,
+		ctx:    context.Background(),
 	}
 }
 
@@ -316,7 +319,7 @@ func (c *Conn) WriteMessage(msgType byte, payload []byte) error {
 		if err != nil {
 			return err
 		}
-		if err := c.ws.WriteMessage(websocket.BinaryMessage, ct); err != nil {
+		if err := c.ws.Write(c.ctx, websocket.MessageBinary, ct); err != nil {
 			return fmt.Errorf("write transport frame: %w", err)
 		}
 	}
@@ -337,11 +340,11 @@ func (c *Conn) WriteJSON(v any) error {
 // violation is terminal: the error is returned and the caller must close.
 func (c *Conn) ReadMessage() (msgType byte, payload []byte, err error) {
 	for {
-		wsType, data, err := c.ws.ReadMessage()
+		wsType, data, err := c.ws.Read(c.ctx)
 		if err != nil {
 			return 0, nil, err
 		}
-		if wsType != websocket.BinaryMessage {
+		if wsType != websocket.MessageBinary {
 			return 0, nil, fmt.Errorf("non-binary WebSocket frame in transport mode")
 		}
 		pt, err := c.sess.Decrypt(data)
@@ -359,25 +362,23 @@ func (c *Conn) ReadMessage() (msgType byte, payload []byte, err error) {
 }
 
 // Close closes the underlying WebSocket.
-func (c *Conn) Close() error { return c.ws.Close() }
+func (c *Conn) Close() error { return c.ws.Close(websocket.StatusNormalClosure, "") }
 
 func readTextFrame(ws *websocket.Conn, timeout time.Duration) ([]byte, error) {
-	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, err
-	}
-	msgType, data, err := ws.ReadMessage()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	msgType, data, err := ws.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if msgType != websocket.TextMessage {
+	if msgType != websocket.MessageText {
 		return nil, fmt.Errorf("expected text frame during handshake, got type %d", msgType)
 	}
 	return data, nil
 }
 
 func writeTextFrame(ws *websocket.Conn, data []byte, timeout time.Duration) error {
-	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-		return err
-	}
-	return ws.WriteMessage(websocket.TextMessage, data)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return ws.Write(ctx, websocket.MessageText, data)
 }

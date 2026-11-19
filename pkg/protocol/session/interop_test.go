@@ -6,6 +6,7 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,7 +16,7 @@ import (
 	"time"
 
 	"github.com/0xk1f0/torque/pkg/protocol/secure"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // startDotnetHost spawns the sendspin-dotnet InteropClient for a scenario
@@ -97,7 +98,7 @@ func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ws, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://127.0.0.1:%d/sendspin", port), nil)
+	ws, _, err := websocket.Dial(context.Background(), fmt.Sprintf("ws://127.0.0.1:%d/sendspin", port), nil)
 	if err != nil {
 		t.Fatalf("dial dotnet host: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestInterop_PairingPSKAgainstDotnetHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ws, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://127.0.0.1:%d/sendspin", port), nil)
+	ws, _, err := websocket.Dial(context.Background(), fmt.Sprintf("ws://127.0.0.1:%d/sendspin", port), nil)
 	if err != nil {
 		t.Fatalf("dial dotnet host: %v", err)
 	}

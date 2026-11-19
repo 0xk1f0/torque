@@ -15,7 +15,7 @@ import (
 
 	"github.com/0xk1f0/torque/pkg/protocol/secure"
 	"github.com/0xk1f0/torque/pkg/protocol/session"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // TestReceiverV2_DynamicPINPairing drives the dynamic pairing-code (PIN) flow
@@ -24,7 +24,6 @@ import (
 // the resulting long-term PSK persisted so a reconnect can authenticate.
 func TestReceiverV2_DynamicPINPairing(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
-	upgrader := websocket.Upgrader{}
 	start := time.Now()
 	clock := func() int64 { return time.Since(start).Microseconds() }
 	serverStore := session.NewMemoryPairingStore()
@@ -32,7 +31,7 @@ func TestReceiverV2_DynamicPINPairing(t *testing.T) {
 	codeCh := make(chan string, 1)
 
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
+		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
