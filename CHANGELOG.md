@@ -2,6 +2,24 @@
 
 Forked and reworked as **client-only** — the encrypted Sendspin client.
 
+## [Unreleased]
+
+### Fixed
+
+- **Playback cutouts ("few seconds of audio, then ~10–15s silence, then
+  resumption") from scheduler late-drop storms.** The scheduler dropped any
+  buffer more than 50ms past its play time, but once the pipeline slipped that
+  far behind — a shifted clock mapping, a decode stall, or a network hiccup —
+  every subsequently arriving chunk was also late, so the client dropped the
+  whole stream one-by-one and stayed silent until the ~10s clock-sync burst or a
+  stream restart rescued it. `processQueue` now detects a desync storm (head of
+  queue >250ms late), flushes the backlog, and re-enters buffering, bounding the
+  outage to roughly `--buffer-ms` instead of a burst interval.
+- Enriched the `Dropped late buffer` log with the chunk's server-side lead,
+  clock-sync RTT/quality/age (`server_lead=…, rtt=…, quality=…, sync_age=…`) so
+  a future occurrence shows whether the timestamp mapping or the pipeline is at
+  fault, and added a periodic 5s `Scheduler stats` line for the timeline.
+
 ## [0.1.0] - 2026-11-10
 
 ### Changed

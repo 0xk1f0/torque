@@ -5,6 +5,7 @@ package sendspin
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"log"
 	gosync "sync"
 	"sync/atomic"
@@ -17,6 +18,12 @@ import (
 // maxStaticDelayMs is the upper bound the Sendspin spec defines for
 // static_delay_ms (integer, range 0–5000).
 const maxStaticDelayMs = 5000
+
+// desyncSkipThreshold is how far past its play time the head-of-queue chunk
+// may fall before the scheduler treats it as a desync storm and re-buffers
+// rather than dropping one late chunk per tick (which would keep the client
+// silent for the whole slip window, until a clock burst or stream restart).
+const desyncSkipThreshold = 250 * time.Millisecond
 
 type Scheduler struct {
 	clockSync    *sync.ClockSync
@@ -106,12 +113,22 @@ func (s *Scheduler) Run() {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Periodic one-line health summary so late-drop storms and silent stalls
+	// are visible in the timeline instead of requiring per-chunk scrolling.
+	tick := 0
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
 			s.processQueue()
+			tick++
+			if tick%500 == 0 {
+				rtt, quality := s.clockSync.GetStats()
+				log.Printf("Scheduler stats: received=%d played=%d dropped=%d buffered=%dms rtt=%dµs quality=%v sync_age=%s",
+					s.received.Load(), s.played.Load(), s.dropped.Load(), s.BufferDepth(),
+					rtt, quality, s.clockSync.TimeSinceLastSync())
+			}
 		}
 	}
 }
@@ -131,6 +148,26 @@ func (s *Scheduler) processQueue() {
 
 	now := time.Now()
 
+	// Desync storm: the head chunk is far past its play time, not the ±50ms
+	// jitter the per-chunk drop below bounds. From here every arriving chunk is
+	// also late (the stream advances in real time), so dropping one per tick
+	// would keep the client silent for the whole slip window. Skip the backlog
+	// and re-enter buffering instead — same machinery Clear() uses for seeks —
+	// limiting the outage to ~bufferMs.
+	if s.bufferQ.Len() > 0 {
+		if head := s.bufferQ.Peek(); now.Sub(head.PlayAt) > desyncSkipThreshold {
+			flushed := s.bufferQ.Len()
+			s.bufferQ = NewBufferQueue()
+			s.buffering = true
+			s.dropped.Add(int64(flushed))
+			log.Printf("Scheduler: playback fell behind by %v; skipping %d late chunks and re-buffering (~%dms)%s",
+				now.Sub(head.PlayAt), flushed, s.bufferTarget*ChunkDurationMs,
+				s.clockContext(head.Timestamp))
+			s.bufferMu.Unlock()
+			return
+		}
+	}
+
 	for s.bufferQ.Len() > 0 {
 		buf := s.bufferQ.Peek()
 
@@ -143,7 +180,7 @@ func (s *Scheduler) processQueue() {
 			// More than 50ms late: drop rather than play out of sync
 			heap.Pop(s.bufferQ)
 			s.dropped.Add(1)
-			log.Printf("Dropped late buffer: %v late", -delay)
+			log.Printf("Dropped late buffer: %v late%s", -delay, s.clockContext(buf.Timestamp))
 		} else {
 			// Within ±50ms window: ready to play
 			heap.Pop(s.bufferQ)
@@ -162,6 +199,17 @@ func (s *Scheduler) processQueue() {
 	}
 
 	s.bufferMu.Unlock()
+}
+
+// clockContext is a diagnostic suffix for late-drop lines: the chunk's lead in
+// the server's frame, and the clock-sync RTT/quality/age. A large positive
+// server_lead on a dropped chunk means the timestamp mapping is off; a ~zero
+// lead with fresh sync points at the server watermark or pipeline latency.
+func (s *Scheduler) clockContext(chunkTS int64) string {
+	leadUs := chunkTS - s.clockSync.ServerMicrosNow()
+	rtt, quality := s.clockSync.GetStats()
+	return fmt.Sprintf(" (server_lead=%dµs, rtt=%dµs, quality=%v, sync_age=%s)",
+		leadUs, rtt, quality, s.clockSync.TimeSinceLastSync())
 }
 
 func (s *Scheduler) Output() <-chan audio.Buffer {
