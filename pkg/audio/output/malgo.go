@@ -42,6 +42,13 @@ type Malgo struct {
 	// Ring buffer for callback-based playback
 	ringBuffer *RingBuffer
 	mu         sync.Mutex
+
+	// scratch is reused by the audio callback so the real-time audio thread
+	// never allocates (allocation churn there triggers GC stop-the-world
+	// pauses that stall callbacks on constrained devices).
+	scratch []int32
+	// volScratch is reused by Write for volume-applied samples, guarded by mu.
+	volScratch []int32
 }
 
 // RingBuffer provides thread-safe circular buffer for audio samples
@@ -110,6 +117,18 @@ func (rb *RingBuffer) Free() int {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	return rb.size - rb.count
+}
+
+// Reset empties the ring in place without releasing its backing array, so the
+// next stream starts silent instead of playing residual samples from the
+// previous one. Safe to call while the audio callback is draining: it only
+// retargets the read/write positions, never the buffer identity.
+func (rb *RingBuffer) Reset() {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.readPos = 0
+	rb.writePos = 0
+	rb.count = 0
 }
 
 // NewMalgo constructs a new malgo-backed audio output. deviceName selects a
@@ -217,8 +236,11 @@ func (m *Malgo) Open(sampleRate, channels, bitDepth int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// If already initialized with same format, reuse
+	// If already initialized with same format, reuse the device — but
+	// re-sync to silence first: samples left in the ring from the previous
+	// stream would otherwise play at the head of the new one.
 	if m.device != nil && m.sampleRate == sampleRate && m.channels == channels && m.bitDepth == bitDepth {
+		m.ringBuffer.Reset()
 		log.Printf("Audio output already initialized with same format, reusing device")
 		return nil
 	}
@@ -361,6 +383,11 @@ func (m *Malgo) Open(sampleRate, channels, bitDepth int) error {
 // Returns an error only if no drain progress occurs for maxStallTime,
 // which indicates the audio callback itself has stalled.
 func (m *Malgo) Write(samples []int32) error {
+	// Serialize with control ops and reuse a volume scratch (no per-chunk
+	// allocation); volume/mute can no longer race the writer. The audio
+	// callback never takes this mutex, so no deadlock.
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.ready {
 		return fmt.Errorf("output not initialized")
 	}
@@ -370,7 +397,7 @@ func (m *Malgo) Write(samples []int32) error {
 		maxStallTime  = 50 * time.Millisecond
 	)
 
-	volumedSamples := applyVolume(samples, m.volume, m.muted)
+	volumedSamples := applyVolumeScratch(samples, m.volume, m.muted, &m.volScratch)
 
 	written := 0
 	lastProgress := time.Now()
@@ -397,10 +424,15 @@ func (m *Malgo) Write(samples []int32) error {
 	return nil
 }
 
-// dataCallback is called by malgo to fill the audio output buffer
+// dataCallback fills the audio output buffer on the real-time audio thread, so
+// it must not allocate in the steady state: scratch is grown once and reused
+// (miniaudio calls the callback from a single thread per device).
 func (m *Malgo) dataCallback(pOutput []byte, frameCount uint32) {
 	totalSamples := int(frameCount) * m.channels
-	samples := make([]int32, totalSamples)
+	if cap(m.scratch) < totalSamples {
+		m.scratch = make([]int32, totalSamples)
+	}
+	samples := m.scratch[:totalSamples]
 
 	m.ringBuffer.Read(samples)
 
@@ -484,20 +516,28 @@ func (m *Malgo) SetVolume(volume int) {
 	if volume > 100 {
 		volume = 100
 	}
+	m.mu.Lock()
 	m.volume = volume
+	m.mu.Unlock()
 	log.Printf("Volume set to %d", volume)
 }
 
 func (m *Malgo) SetMuted(muted bool) {
+	m.mu.Lock()
 	m.muted = muted
+	m.mu.Unlock()
 	log.Printf("Muted: %v", muted)
 }
 
 func (m *Malgo) GetVolume() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.volume
 }
 
 func (m *Malgo) IsMuted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.muted
 }
 

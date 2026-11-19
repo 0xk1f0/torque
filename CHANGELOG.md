@@ -26,6 +26,17 @@ Forked and reworked as **client-only** — the encrypted Sendspin client.
   (128-entry ≈2.5s) FIFO to a dedicated decode worker, and each chunk carries a
   stream generation so async-decoded audio from a superseded track is dropped
   instead of bleeding into the new stream.
+- **Malgo output: no allocations on the real-time audio callback.** The
+  callback recreated its `[]int32` scratch every ~20ms period; on constrained
+  devices the resulting GC stop-the-world pauses stall the callback and cause
+  underruns. The scratch is now grown once and reused.
+- **Malgo output: reuse the volume scratch under the output mutex.** `Write`
+  no longer allocates a fresh slice per chunk, and `SetVolume`/`SetMuted`
+  serialize with `Write` — eliminating a data race on `m.volume`/`m.muted`
+  (reads in `Write`/`applyVolume` vs. writes from the control path).
+- **Malgo output: drain the ring when a same-format stream reuses the device**,
+  so residual samples from the previous track don't play at the head of the
+  next one.
 
 ## [0.1.0] - 2026-11-10
 
