@@ -28,18 +28,19 @@ import (
 )
 
 var (
-	serverAddr     string
-	name           string
-	identityPath   string
-	bufferMs       int
-	outputDelayMs  int
-	bufferCapacity int
-	maxSampleRate  int
-	maxBitDepth    int
-	unpairedAccess bool
-	showVersion    bool
-	deviceName     string
-	listDevices    bool
+	serverAddr       string
+	name             string
+	identityPath     string
+	bufferMs         int
+	outputDelayMs    int
+	bufferCapacity   int
+	maxSampleRate    int
+	maxBitDepth      int
+	unpairedAccess   bool
+	showVersion      bool
+	showPairingToken bool
+	deviceName       string
+	listDevices      bool
 )
 
 func init() {
@@ -67,6 +68,8 @@ func init() {
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.BoolVar(&showVersion, "v", false, "shorthand for --version")
 
+	flag.BoolVar(&showPairingToken, "pairing-token", false, "Print this client's Pairing PSK token (SP:0...; enter it on a server to begin Pairing PSK pairing) and exit")
+
 	flag.StringVar(&deviceName, "device", "", "Playback device name as reported by --list-devices (e.g. \"bcm2835 Headphones\" or its short part before \", \"). Empty = miniaudio platform default. Fails loudly if the device is not found, instead of silently falling back to a null/discard backend.")
 	flag.StringVar(&deviceName, "d", "", "shorthand for --device")
 
@@ -91,6 +94,7 @@ Options (long forms accept a double dash; aliases are single dash):
        --unpaired-access        Admit unpaired servers (play without dynamic pin-code pairing).
                                 Off by default; enable only for servers without pairing support.
   -l,  --list-devices           Enumerate the playback devices miniaudio/ALSA can see and exit
+       --pairing-token          Print this client's Pairing PSK token (SP:0...) and exit
   -v,  --version                Print version and exit
   -h,  --help                   Show this help
 
@@ -178,6 +182,18 @@ func main() {
 	store, err := sendspin.NewFileStore(filepath.Join(filepath.Dir(filepath.Clean(identityPath)), "store.json"))
 	if err != nil {
 		log.Fatalf("client store: %v", err)
+	}
+
+	// Print the Pairing PSK token and exit: the operator enters the SP:0
+	// token into a server to begin Pairing PSK pairing. Generating it
+	// provisions a persistent pairing PSK on first use.
+	if showPairingToken {
+		tok, err := sendspin.PairingToken(id, store)
+		if err != nil {
+			log.Fatalf("pairing token: %v", err)
+		}
+		fmt.Println(tok)
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

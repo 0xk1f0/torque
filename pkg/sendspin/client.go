@@ -177,6 +177,9 @@ type Receiver struct {
 	// paired records that this connection went through the pairing_psk flow.
 	// guarded by stateMu.
 	paired bool
+	// activePskID is the psk_id of the long-term PSK this connection is keyed
+	// on (the record to drop when the server unpairs us). guarded by stateMu.
+	activePskID string
 	// hello is the client/hello this connection advertised; retained so a
 	// pairing activation arriving after the initial activate can re-run the
 	// pairing flow. guarded by stateMu.
@@ -279,6 +282,12 @@ func (r *Receiver) Connect() error {
 	}
 
 	hello, cat := r.buildHello()
+	// Record the matched PSK category before any pairing flow runs: the flow
+	// needs it to verify the pairing method (e.g. pairing_psk only on a
+	// pairing-PSK-keyed connection). finishPairing promotes it to long-term.
+	r.stateMu.Lock()
+	r.cat = cat
+	r.stateMu.Unlock()
 	sess, err := session.EstablishClient(conn, session.ClientConfig{Hello: hello, PSKCategory: cat})
 	if err != nil {
 		conn.Close()
@@ -306,12 +315,8 @@ func (r *Receiver) Connect() error {
 
 	r.stateMu.Lock()
 	r.hello = hello
-	// When the server asked us to pair right after connect, the pairing flow
-	// already promoted cat to long-term (finishPairing) — don't clobber it
-	// with the pre-pairing category.
-	if !r.paired {
-		r.cat = cat
-	}
+	// cat was set before establishment and, if this connection just paired,
+	// finishPairing already promoted it to long-term; never clobber that.
 	r.stateMu.Unlock()
 	r.conn = conn
 	r.sess = sess
@@ -380,11 +385,29 @@ func (r *Receiver) defaultResolvePSK(pskID string, _ secure.PSKCategoryCode) (se
 		if psk, ok := r.config.Store.LookupPSK(pskID); ok {
 			r.stateMu.Lock()
 			r.matchedCat = session.PSKLongTerm
+			r.activePskID = psk.ID()
+			r.stateMu.Unlock()
+			return psk, true
+		}
+		// The pairing PSK stays among the handshake candidates at all times
+		// (spec: the server's re-handshake to the pairing PSK succeeds only if
+		// the client recognizes its psk_id).
+		if psk, ok := r.config.Store.PairingPSK(); ok && psk.ID() == pskID {
+			r.stateMu.Lock()
+			r.matchedCat = session.PSKPairing
 			r.stateMu.Unlock()
 			return psk, true
 		}
 	}
 	return secure.PSK{}, false
+}
+
+// memorizeActivePSK records which long-term PSK this connection is currently
+// keyed on, so server/unpair can drop exactly that record.
+func (r *Receiver) memorizeActivePSK(psk secure.PSK) {
+	r.stateMu.Lock()
+	r.activePskID = psk.ID()
+	r.stateMu.Unlock()
 }
 
 // pairIfRequested completes pairing when the server's initial activate
@@ -403,10 +426,49 @@ func (r *Receiver) pairIfRequested(sess *session.ClientSession, hello session.Cl
 	if r.config.Store == nil {
 		return nil, fmt.Errorf("server requested pairing (method=%s) but no Store is configured", sess.Activate.Pairing.Method)
 	}
-	if sess.Activate.Pairing.Method != session.PairMethodDynamicPairingCode {
-		return nil, fmt.Errorf("server requested %q pairing; only dynamic_pairing_code is supported (this server may need a pairing method that was removed)", sess.Activate.Pairing.Method)
+	switch sess.Activate.Pairing.Method {
+	case session.PairMethodDynamicPairingCode:
+		return r.pairPIN(sess, hello, r.nextPairingIndex())
+	case session.PairMethodPairingPSK:
+		return r.pairPSK(sess, hello)
+	default:
+		return nil, fmt.Errorf("server requested %q pairing; torque supports dynamic_pairing_code and pairing_psk (this server may need a pairing method that was removed)", sess.Activate.Pairing.Method)
 	}
-	return r.pairPIN(sess, hello, r.nextPairingIndex())
+}
+
+// pairPSK runs the Pairing PSK flow: the handshake already authenticated this
+// connection with the client's pairing PSK, so the client delivers a fresh
+// long-term PSK directly (no pairing code, no PAKE round). The session layer
+// then answers the server's re-handshake to the new PSK and re-establishes
+// playback.
+func (r *Receiver) pairPSK(sess *session.ClientSession, hello session.ClientHello) (*session.ClientSession, error) {
+	r.stateMu.Lock()
+	cat := r.cat
+	r.stateMu.Unlock()
+	if cat != session.PSKPairing {
+		// The pairing_psk method is only admissible on a pairing-PSK-keyed
+		// connection; JudgeActivate enforces this, but guard the flow anyway.
+		return nil, fmt.Errorf("server requested pairing_psk on a %s-keyed connection", cat)
+	}
+	r.pairingActive.Store(true)
+	defer r.pairingActive.Store(false)
+
+	newPSK, err := secure.NewPSK()
+	if err != nil {
+		return nil, fmt.Errorf("pairing_psk flow: %w", err)
+	}
+	persist := func(_ string, psk secure.PSK) error {
+		if err := r.config.Store.PutRecord(psk); err != nil {
+			return err
+		}
+		r.memorizeActivePSK(psk)
+		return nil
+	}
+	after, err := sess.CompletePairingPSKClient(newPSK, persist, hello)
+	if err != nil {
+		return nil, fmt.Errorf("pairing_psk flow: %w", err)
+	}
+	return r.finishPairing(after)
 }
 
 // pairPIN runs the dynamic pairing-code (PIN) flow, which authenticates the
@@ -432,12 +494,18 @@ func (r *Receiver) pairPIN(sess *session.ClientSession, hello session.ClientHell
 		}
 	}
 	cfg := session.PINPairingClientConfig{
-		Method:         string(session.PairMethodDynamicPairingCode),
-		PairingIndex:   uint32(pairingIndex),
-		Format:         format,
-		EmitCode:       emit,
-		NewPSK:         func() (secure.PSK, error) { return secure.NewPSK() },
-		Persist:        func(_ string, psk secure.PSK) error { return r.config.Store.PutRecord(psk) },
+		Method:       string(session.PairMethodDynamicPairingCode),
+		PairingIndex: uint32(pairingIndex),
+		Format:       format,
+		EmitCode:     emit,
+		NewPSK:       func() (secure.PSK, error) { return secure.NewPSK() },
+		Persist: func(_ string, psk secure.PSK) error {
+			if err := r.config.Store.PutRecord(psk); err != nil {
+				return err
+			}
+			r.memorizeActivePSK(psk)
+			return nil
+		},
 		ResultingHello: hello,
 	}
 	after, err := sess.RunPINPairing(cfg)
@@ -508,6 +576,11 @@ func (r *Receiver) buildHello() (session.ClientHello, session.PSKCategory) {
 			BufferCapacity:   r.config.BufferCapacity,
 		},
 		SupportedPairMethods: session.SupportedPairMethods{
+			string(session.PairMethodPairingPSK): {
+				// The pairing PSK is provisioned per device and surfaced to
+				// the operator as an "SP:0" pairing token (see PairingToken).
+				Locations: []string{"operator"},
+			},
 			string(session.PairMethodDynamicPairingCode): {
 				// Per spec a dynamic_pairing_code descriptor is only
 				// recognized when it declares both out_channels and formats.
@@ -533,6 +606,28 @@ func (r *Receiver) buildHello() (session.ClientHello, session.PSKCategory) {
 		cat = session.PSKSentinel
 	}
 	return hello, cat
+}
+
+// PairingToken returns this client's "SP:0" pairing token: the version-0
+// token carrying the client's static public key and the provisioned pairing
+// PSK, which the operator enters into a server to begin Pairing PSK pairing.
+// Generating it provisions and persists a fresh pairing PSK on first use.
+func PairingToken(identity *secure.Identity, store ClientStore) (string, error) {
+	if identity == nil {
+		return "", fmt.Errorf("PairingToken: identity is required")
+	}
+	if store == nil {
+		return "", fmt.Errorf("PairingToken: a ClientStore is required to persist the pairing PSK")
+	}
+	psk, err := store.EnsurePairingPSK()
+	if err != nil {
+		return "", fmt.Errorf("provision pairing PSK: %w", err)
+	}
+	tok, err := secure.PairingTokenV0(identity.PublicKey(), psk)
+	if err != nil {
+		return "", fmt.Errorf("encode pairing token: %w", err)
+	}
+	return tok, nil
 }
 
 func buildFormats(preferredCodec string, maxSampleRate, maxBitDepth int) []session.AudioFormat {

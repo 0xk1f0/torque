@@ -174,3 +174,136 @@ func TestReceiver_DynamicPINPairing(t *testing.T) {
 		t.Fatalf("store has %d pairing records, want 1", n)
 	}
 }
+
+// TestReceiver_PairingPSK drives the spec's Pairing PSK flow through the
+// client: the Noise handshake is keyed on the client's provisioned pairing
+// PSK, the server activate demands pairing_psk, and the client delivers a
+// fresh long-term PSK directly (no pairing code, no PAKE round) and is
+// promoted to a paired, playback-capable session. The pairing PSK must be
+// resolved by psk_id during the handshake and must survive the pairing (a new
+// pairing does not consume it).
+func TestReceiver_PairingPSK(t *testing.T) {
+	serverID, _ := secure.GenerateIdentity()
+	serverStore := session.NewMemoryPairingStore()
+	available := make(chan struct{}, 1)
+	start := time.Now()
+	clock := func() int64 { return time.Since(start).Microseconds() }
+
+	clientPairingPSK, err := secure.NewPSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// The handshake references the client's pairing PSK.
+		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{
+			Identity: serverID,
+			SelectPSK: func(string) (secure.PSK, secure.PSKCategoryCode, error) {
+				return clientPairingPSK, secure.CategoryPairing, nil
+			},
+		})
+		if err != nil {
+			return
+		}
+		sess, err := session.EstablishServer(conn, session.ServerConfig{
+			ServerName:        "pairing-psk-peer",
+			PSKCategory:       session.PSKPairing,
+			InitialActivities: []session.Activity{session.ActivityPairing},
+			Pairing:           &session.Pairing{Method: session.PairMethodPairingPSK},
+		})
+		if err != nil {
+			t.Logf("establish: %v", err)
+			return
+		}
+		after, err := sess.CompletePairingPSK(serverStore.PutRecord, session.ServerConfig{
+			ServerName:        "pairing-psk-peer",
+			InitialActivities: []session.Activity{session.ActivityPlayback},
+		})
+		if err != nil {
+			t.Logf("server pairing_psk: %v", err)
+			return
+		}
+		if n := serverStore.Records(); len(n) != 1 {
+			t.Logf("server store has %d records, want 1", len(n))
+		}
+		for {
+			msgType, payload, err := after.Conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if msgType != secure.MsgTypeJSON {
+				continue
+			}
+			msg, err := session.Parse(payload)
+			if err != nil {
+				continue
+			}
+			switch v := msg.(type) {
+			case *session.ClientTime:
+				_ = writeControl(after.Conn, session.ServerTime{
+					ClientTransmitted: v.ClientTransmitted,
+					ServerReceived:    clock(),
+					ServerTransmitted: clock(),
+				})
+			case *session.ClientState:
+				if v.Available {
+					select {
+					case available <- struct{}{}:
+					default:
+					}
+				}
+			case *session.ClientGoodbye:
+				return
+			}
+		}
+	}))
+	defer hs.Close()
+
+	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
+
+	clientID, _ := secure.GenerateIdentity()
+	store, err := NewFileStore(t.TempDir() + "/pairings.json")
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	// Provision the client's per-device pairing PSK, as --pairing-token does.
+	if err := store.SetPairingPSKIfAbsent(clientPairingPSK); err != nil {
+		t.Fatalf("provision pairing PSK: %v", err)
+	}
+
+	recv, err := NewReceiver(Config{
+		ServerAddr:    addr,
+		Identity:      clientID,
+		Name:          "pairing-psk-client",
+		Store:         store,
+		MaxSampleRate: 48000,
+		MaxBitDepth:   16,
+	})
+	if err != nil {
+		t.Fatalf("NewReceiver: %v", err)
+	}
+	defer recv.Close()
+	go func() {
+		for range recv.Output() {
+		}
+	}()
+
+	if err := recv.Connect(); err != nil {
+		t.Fatalf("Receiver.Connect (pairing_psk): %v", err)
+	}
+
+	select {
+	case <-available:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peer never saw the paired client report available:true")
+	}
+
+	// The pairing PSK must NOT be consumed by the pairing: it persists.
+	if psk, ok := store.PairingPSK(); !ok || psk != clientPairingPSK {
+		t.Fatalf("pairing PSK was not preserved across pairing")
+	}
+}

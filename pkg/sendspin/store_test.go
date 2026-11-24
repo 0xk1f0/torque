@@ -137,3 +137,41 @@ func mustPSK(t *testing.T) secure.PSK {
 	}
 	return psk
 }
+
+// TestStore_PairingPSKGenerateOnce verifies the pairing PSK is provisioned
+// exactly once (per the spec's long-lived, non-consuming lifecycle), survives
+// a reload, and that an operator-provisioned PSK is never clobbered.
+func TestStore_PairingPSKGenerateOnce(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+
+	s := mustStore(t, path)
+	if _, ok := s.PairingPSK(); ok {
+		t.Fatal("fresh store must have no pairing PSK")
+	}
+	p1, err := s.EnsurePairingPSK()
+	if err != nil {
+		t.Fatalf("EnsurePairingPSK: %v", err)
+	}
+	p2, err := s.EnsurePairingPSK()
+	if err != nil {
+		t.Fatalf("EnsurePairingPSK (2nd): %v", err)
+	}
+	if p1 != p2 {
+		t.Error("EnsurePairingPSK must not regenerate an existing pairing PSK")
+	}
+
+	// A reload-from-disk store sees the same pairing PSK.
+	s2 := mustStore(t, path)
+	if p3, ok := s2.PairingPSK(); !ok || p3 != p1 {
+		t.Error("pairing PSK did not persist across store reload")
+	}
+
+	// An operator-provisioned PSK wins and is never overwritten.
+	other := mustPSK(t)
+	if err := s2.SetPairingPSKIfAbsent(other); err != nil {
+		t.Fatalf("SetPairingPSKIfAbsent: %v", err)
+	}
+	if p3, _ := s2.PairingPSK(); p3 != p1 {
+		t.Error("SetPairingPSKIfAbsent clobbered the existing pairing PSK")
+	}
+}

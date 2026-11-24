@@ -70,8 +70,10 @@ torque --server 192.168.1.10:8927 --name "Living Room" --device snd_rpi_hifiberr
 
 Pairing is automatic: when the server requests it, torque shows a 6-digit
 (dynamic) code to enter in Home Assistant and saves the long-term PSK, so
-later runs connect already paired. By default unpaired servers are not
-admitted — playback requires dynamic pin-code pairing first. Pass
+later runs connect already paired. torque also implements the spec's Pairing
+PSK method: run `torque --pairing-token` to print this client's `SP:0` token
+and enter it (with its `client_id`) on a server to begin pairing. By default
+unpaired servers are not admitted — playback requires pairing first. Pass
 `--unpaired-access` to also allow a server this client has not paired with
 to play audio directly (for servers without pairing support; they may still
 request pairing).

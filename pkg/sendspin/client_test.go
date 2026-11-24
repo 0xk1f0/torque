@@ -996,3 +996,62 @@ func TestReceiver_LaterActivateSyncsClock(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestClient_HelloOffersPairingPSK guards the spec requirement that every
+// client offers at least the Pairing PSK method.
+func TestClient_HelloOffersPairingPSK(t *testing.T) {
+	clientID, _ := secure.GenerateIdentity()
+	recv, err := NewReceiver(Config{
+		ServerAddr: "127.0.0.1:9",
+		Identity:   clientID,
+		Name:       "hello-psk",
+	})
+	if err != nil {
+		t.Fatalf("NewReceiver: %v", err)
+	}
+	defer recv.Close()
+
+	hello, _ := recv.buildHello()
+	if _, ok := hello.SupportedPairMethods[string(session.PairMethodPairingPSK)]; !ok {
+		t.Error("client/hello must offer the pairing_psk method (spec: every client offers at least Pairing PSK)")
+	}
+	if _, ok := hello.SupportedPairMethods[string(session.PairMethodDynamicPairingCode)]; !ok {
+		t.Error("client/hello must still offer dynamic_pairing_code")
+	}
+}
+
+// TestReceiver_DefaultResolvePSK_MatchesPairingPSK verifies the pairing PSK
+// is a standing handshake candidate (spec: it stays available at all times,
+// not only during a pairing activity) and records the pairing category.
+func TestReceiver_DefaultResolvePSK_MatchesPairingPSK(t *testing.T) {
+	clientID, _ := secure.GenerateIdentity()
+	store, err := NewFileStore(t.TempDir() + "/s.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairingPSK, err := secure.NewPSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPairingPSKIfAbsent(pairingPSK); err != nil {
+		t.Fatal(err)
+	}
+
+	recv, err := NewReceiver(Config{ServerAddr: "127.0.0.1:9", Identity: clientID, Name: "psk-res", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+
+	pskWireID := pairingPSK.ID()
+	got, ok := recv.defaultResolvePSK(pskWireID, secure.CategoryPairing)
+	if !ok || got != pairingPSK {
+		t.Fatalf("defaultResolvePSK did not resolve the pairing PSK (ok=%v)", ok)
+	}
+	recv.stateMu.Lock()
+	cat := recv.matchedCat
+	recv.stateMu.Unlock()
+	if cat != session.PSKPairing {
+		t.Errorf("matchedCat = %v, want pairing", cat)
+	}
+}

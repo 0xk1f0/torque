@@ -34,6 +34,17 @@ type ClientStore interface {
 	// PutRecord persists a long-term PSK (deduplicated by psk_id).
 	PutRecord(psk secure.PSK) error
 
+	// PairingPSK returns the provisioned per-client pairing PSK and whether
+	// one exists.
+	PairingPSK() (secure.PSK, bool)
+	// EnsurePairingPSK returns the pairing PSK, generating and persisting a
+	// fresh CSPRNG one on first use (generate-once, per the spec's pairing-PSK
+	// lifecycle: it is long-lived and never consumed by a pairing).
+	EnsurePairingPSK() (secure.PSK, error)
+	// SetPairingPSKIfAbsent persists an operator-provisioned pairing PSK the
+	// first time it is called, leaving any existing pairing PSK untouched.
+	SetPairingPSKIfAbsent(psk secure.PSK) error
+
 	// GetPlayerState returns the saved volume/mute and whether one was
 	// present. A missing file yields ok=false, not an error.
 	GetPlayerState() (VolumeState, bool)
@@ -50,8 +61,9 @@ type FileStore struct {
 }
 
 type persistedStore struct {
-	Pairings []string     `json:"pairings,omitempty"` // PSK strings for secure.ParsePSK
-	Player   *VolumeState `json:"player,omitempty"`
+	Pairings   []string     `json:"pairings,omitempty"` // PSK strings for secure.ParsePSK
+	PairingPSK *string      `json:"pairing_psk,omitempty"`
+	Player     *VolumeState `json:"player,omitempty"`
 }
 
 // NewFileStore returns a store backed by path. The file is read lazily (and
@@ -110,6 +122,61 @@ func (s *FileStore) PutRecord(psk secure.PSK) error {
 	}
 	p.Pairings = append(p.Pairings, psk.String())
 	return s.save(p)
+}
+
+// PairingPSK returns the provisioned per-client pairing PSK.
+func (s *FileStore) PairingPSK() (secure.PSK, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pairingPSKLocked()
+}
+
+// EnsurePairingPSK returns the pairing PSK, generating and persisting a fresh
+// CSPRNG one on first use. A previously provisioned PSK is never overwritten.
+func (s *FileStore) EnsurePairingPSK() (secure.PSK, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if psk, ok := s.pairingPSKLocked(); ok {
+		return psk, nil
+	}
+	psk, err := secure.NewPSK()
+	if err != nil {
+		return secure.PSK{}, err
+	}
+	if err := s.setPairingPSKLocked(psk); err != nil {
+		return secure.PSK{}, err
+	}
+	return psk, nil
+}
+
+// SetPairingPSKIfAbsent persists an operator-provisioned pairing PSK the
+// first time it is called; a pairing PSK already in the store is untouched.
+func (s *FileStore) SetPairingPSKIfAbsent(psk secure.PSK) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pairingPSKLocked(); ok {
+		return nil
+	}
+	return s.setPairingPSKLocked(psk)
+}
+
+func (s *FileStore) setPairingPSKLocked(psk secure.PSK) error {
+	p, _ := s.loadPersisted()
+	enc := psk.String()
+	p.PairingPSK = &enc
+	return s.save(p)
+}
+
+func (s *FileStore) pairingPSKLocked() (secure.PSK, bool) {
+	p, _ := s.loadPersisted()
+	if p.PairingPSK == nil {
+		return secure.PSK{}, false
+	}
+	psk, err := secure.ParsePSK(*p.PairingPSK)
+	if err != nil {
+		return secure.PSK{}, false
+	}
+	return psk, true
 }
 
 // GetPlayerState returns the saved volume/mute and whether one was present.
