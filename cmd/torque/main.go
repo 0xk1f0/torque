@@ -227,6 +227,22 @@ func main() {
 		OnError:       func(err error) { log.Printf("client error: %v", err) },
 		OnStateChange: func(s sendspin.PlayerState) { log.Printf("state: %s (connected=%v)", s.State, s.Connected) },
 		OnCommand:     func(c session.PlayerCommand) {},
+		OnControllerState: func(s session.ControllerState) {
+			repeat, shuffle, vol, mute := "-", "-", "-", "-"
+			if s.Repeat != nil {
+				repeat = *s.Repeat
+			}
+			if s.Shuffle != nil {
+				shuffle = fmt.Sprintf("%v", *s.Shuffle)
+			}
+			if s.Volume != nil {
+				vol = fmt.Sprintf("%d", *s.Volume)
+			}
+			if s.Muted != nil {
+				mute = fmt.Sprintf("%v", *s.Muted)
+			}
+			log.Printf("controller: commands=%v volume=%s mute=%s repeat=%s shuffle=%s", s.SupportedCommands, vol, mute, repeat, shuffle)
+		},
 	})
 	if err != nil {
 		log.Fatalf("player: %v", err)

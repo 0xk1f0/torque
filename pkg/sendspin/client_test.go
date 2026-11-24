@@ -1055,3 +1055,44 @@ func TestReceiver_DefaultResolvePSK_MatchesPairingPSK(t *testing.T) {
 		t.Errorf("matchedCat = %v, want pairing", cat)
 	}
 }
+
+// TestControllerCommandGating verifies the controller role's send rules: a
+// client sends only commands the server currently advertises, and seeks stay
+// within seek_max_ms; without a controller state, commands are unconstrained.
+func TestControllerCommandGating(t *testing.T) {
+	vol := 40
+	pos := 90_000
+	ctrl := session.ControllerState{
+		SupportedCommands: []string{"play", "pause", "seek"},
+		SeekMaxMs:         ptr(120_000),
+	}
+	notKnown := session.ControllerState{}
+
+	seek := session.ControllerCommand{Command: session.CmdSeek, PositionMs: ptr(pos)}
+
+	ok := func(cmd session.ControllerCommand, st session.ControllerState, known bool) error {
+		return validateControllerCommand(cmd, st, known)
+	}
+
+	if err := ok(session.ControllerCommand{Command: session.CmdPlay}, ctrl, true); err != nil {
+		t.Errorf("supported play rejected: %v", err)
+	}
+	if err := ok(seek, ctrl, true); err != nil {
+		t.Errorf("in-range seek rejected: %v", err)
+	}
+	if err := ok(session.ControllerCommand{Command: session.CmdNext}, ctrl, true); err == nil {
+		t.Error("command absent from supported_commands must be rejected")
+	}
+	if err := ok(session.ControllerCommand{Command: session.CmdNext}, notKnown, false); err != nil {
+		t.Errorf("command before first controller state must be allowed: %v", err)
+	}
+	if err := ok(session.ControllerCommand{Command: session.CmdSeek, PositionMs: ptr(130_000)}, ctrl, true); err == nil {
+		t.Error("seek beyond seek_max_ms must be rejected")
+	}
+	if err := ok(session.ControllerCommand{Command: session.CmdSeek, PositionMs: ptr(130_000)}, notKnown, false); err != nil {
+		t.Errorf("seek before first controller state must not be bounded: %v", err)
+	}
+	if err := ok(session.ControllerCommand{Command: session.CmdVolume, Volume: &vol}, ctrl, true); err == nil {
+		t.Error("volume must be rejected when not in supported_commands")
+	}
+}

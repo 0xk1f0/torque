@@ -11,6 +11,7 @@ import (
 	"log"
 	"math"
 	"net/url"
+	"slices"
 	stdsync "sync"
 	"sync/atomic"
 	"time"
@@ -106,14 +107,15 @@ type Config struct {
 	SyncMonitorInterval time.Duration
 	SyncLossGrace       time.Duration
 
-	DeviceInfo     DeviceInfo
-	DecoderFactory func(audio.Format) (decode.Decoder, error)
-	OnMetadata     func(Metadata)
-	OnStreamStart  func(audio.Format)
-	OnStreamEnd    func()
-	OnError        func(error)
-	OnCommand      func(session.PlayerCommand)
-	OnUnpair       func()
+	DeviceInfo        DeviceInfo
+	DecoderFactory    func(audio.Format) (decode.Decoder, error)
+	OnMetadata        func(Metadata)
+	OnStreamStart     func(audio.Format)
+	OnStreamEnd       func()
+	OnError           func(error)
+	OnCommand         func(session.PlayerCommand)
+	OnControllerState func(session.ControllerState)
+	OnUnpair          func()
 
 	// Output overrides the playback backend (Player only). Nil = miniaudio.
 	Output output.Output
@@ -180,6 +182,12 @@ type Receiver struct {
 	// activePskID is the psk_id of the long-term PSK this connection is keyed
 	// on (the record to drop when the server unpairs us). guarded by stateMu.
 	activePskID string
+	// ctrl is the latest server/state controller object, used to gate
+	// controller commands on the server's current supported_commands and
+	// seek_max_ms. ctrlSet is false until the first controller object
+	// arrives (commands are unconstrained before then). guarded by stateMu.
+	ctrl    session.ControllerState
+	ctrlSet bool
 	// hello is the client/hello this connection advertised; retained so a
 	// pairing activation arriving after the initial activate can re-run the
 	// pairing flow. guarded by stateMu.
@@ -1069,6 +1077,18 @@ func (r *Receiver) decodeAndSchedule(job decodeJob) {
 }
 
 func (r *Receiver) handleServerState(st *session.ServerState) {
+	// Controller state (controller@v1 role): track the server's current
+	// supported_commands / group volume / mute / repeat / shuffle / seek
+	// limit and surface it, so controller commands can be gated on it.
+	if st.Controller != nil {
+		r.stateMu.Lock()
+		r.ctrl = *st.Controller
+		r.ctrlSet = true
+		r.stateMu.Unlock()
+		if r.config.OnControllerState != nil {
+			r.config.OnControllerState(*st.Controller)
+		}
+	}
 	if st.Metadata == nil {
 		return
 	}
@@ -1340,12 +1360,17 @@ func (r *Receiver) SendAvailability(available bool) error {
 	return r.sendPlayerState()
 }
 
-// SendControllerCommand sends a controller command (client/command).
+// SendControllerCommand sends a controller command (client/command). When a
+// server/state controller object has been received, the command is gated on
+// the server's current supported_commands and seek_max_ms, per the controller
+// role's rules (a controller client sends only the commands the server
+// advertises).
 func (r *Receiver) SendControllerCommand(cmd session.ControllerCommand) error {
-	if !cmd.Command.Valid() {
-		return fmt.Errorf("invalid controller command %q", cmd.Command)
-	}
-	if err := cmd.Validate(); err != nil {
+	r.stateMu.Lock()
+	ctrl := r.ctrl
+	known := r.ctrlSet
+	r.stateMu.Unlock()
+	if err := validateControllerCommand(cmd, ctrl, known); err != nil {
 		return err
 	}
 	raw, err := session.Marshal(&session.ClientCommand{Controller: &cmd})
@@ -1353,6 +1378,25 @@ func (r *Receiver) SendControllerCommand(cmd session.ControllerCommand) error {
 		return err
 	}
 	return r.conn.WriteMessage(secure.MsgTypeJSON, raw)
+}
+
+// validateControllerCommand checks a controller command against the spec's
+// per-command field rules and, when a controller state is known, against the
+// server's current supported_commands and seek_max_ms.
+func validateControllerCommand(cmd session.ControllerCommand, ctrl session.ControllerState, known bool) error {
+	if !cmd.Command.Valid() {
+		return fmt.Errorf("invalid controller command %q", cmd.Command)
+	}
+	if err := cmd.Validate(); err != nil {
+		return err
+	}
+	if known && !slices.Contains(ctrl.SupportedCommands, string(cmd.Command)) {
+		return fmt.Errorf("controller command %q is not in the server's supported_commands %v", cmd.Command, ctrl.SupportedCommands)
+	}
+	if cmd.Command == session.CmdSeek && ctrl.SeekMaxMs != nil && cmd.PositionMs != nil && *cmd.PositionMs > *ctrl.SeekMaxMs {
+		return fmt.Errorf("seek position %d exceeds seek_max_ms %d", *cmd.PositionMs, *ctrl.SeekMaxMs)
+	}
+	return nil
 }
 
 // defaultDecoderFor maps a wire format to its decoder.

@@ -160,6 +160,8 @@ type ControllerState struct {
 	SupportedCommands []string `json:"supported_commands"`
 	Volume            *int     `json:"volume,omitempty"`
 	Muted             *bool    `json:"muted,omitempty"`
+	Repeat            *string  `json:"repeat,omitempty"`
+	Shuffle           *bool    `json:"shuffle,omitempty"`
 	SeekMaxMs         *int     `json:"seek_max_ms,omitempty"`
 }
 
