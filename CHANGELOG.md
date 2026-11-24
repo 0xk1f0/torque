@@ -26,6 +26,10 @@ Forked and reworked as **client-only** — the encrypted Sendspin client.
   (128-entry ≈2.5s) FIFO to a dedicated decode worker, and each chunk carries a
   stream generation so async-decoded audio from a superseded track is dropped
   instead of bleeding into the new stream.
+- **`stream/clear` drops in-flight decode work.** A seek/track-jump cleared the
+  scheduler buffer but left raw chunks already queued for async decode valid,
+  so they could be decoded after the clear and replay pre-jump audio. The clear
+  now retires the decode generation, discarding that in-flight audio.
 - **Malgo output: no allocations on the real-time audio callback.** The
   callback recreated its `[]int32` scratch every ~20ms period; on constrained
   devices the resulting GC stop-the-world pauses stall the callback and cause
