@@ -24,7 +24,7 @@ type VolumeState struct {
 }
 
 // ClientStore persists client state tied to the identity: pairing records and
-// player volume/mute. Both ReceiverV2 (pairing) and PlayerV2 (volume/mute)
+// player volume/mute. Both Receiver (pairing) and Player (volume/mute)
 // consume the same store.
 type ClientStore interface {
 	// LookupPSK returns the recorded long-term PSK whose psk_id matches

@@ -1,4 +1,4 @@
-// ABOUTME: The spec-v2 client — plays audio over the Noise-encrypted Sendspin
+// ABOUTME: The client — plays audio over the Noise-encrypted Sendspin
 // ABOUTME: wire: handshake, session, clock sync, stream lifecycle, decode,
 // ABOUTME: scheduling, sync-loss degradation, and reconnect.
 package sendspin
@@ -25,12 +25,12 @@ import (
 	"github.com/coder/websocket"
 )
 
-// V2TimeSyncBurstSize is the clock-sync burst size (spec: ≥8 per burst).
-const V2TimeSyncBurstSize = 8
+// TimeSyncBurstSize is the clock-sync burst size (spec: ≥8 per burst).
+const TimeSyncBurstSize = 8
 
-// Defaults for clock-sync loss monitoring on the v2 client (see V2Config).
+// Defaults for clock-sync loss monitoring on the client (see Config).
 const (
-	defaultV2SyncMonitorInterval = 500 * time.Millisecond
+	defaultSyncMonitorInterval = 500 * time.Millisecond
 	// SyncLossGrace must comfortably exceed the clock-sync cadence
 	// (clockSyncLoop bursts every 10s). A grace shorter than the burst interval
 	// makes the receiver go stale mid-cycle and oscillate pause/resume: it syncs
@@ -38,7 +38,7 @@ const (
 	// the next burst only to pause again. 30s is three burst intervals, so a
 	// live connection stays fresh and loss is declared only for a genuinely dead
 	// server (30s with no client/time reply).
-	defaultV2SyncLossGrace = 30 * time.Second
+	defaultSyncLossGrace = 30 * time.Second
 
 	// decodeQueueDepth bounds the raw-chunk pipeline between the read loop and
 	// the decode worker (~2.5s of 20ms chunks): reads pause only when decode
@@ -56,8 +56,8 @@ type decodeJob struct {
 	Format    audio.Format
 }
 
-// V2Config configures the spec-v2 client (ReceiverV2 / PlayerV2).
-type V2Config struct {
+// Config configures the client (Receiver / Player).
+type Config struct {
 	// ServerAddr is the server address (host:port).
 	ServerAddr string
 	// Identity is the client's persistent Curve25519 keypair; the client_id
@@ -115,22 +115,22 @@ type V2Config struct {
 	OnCommand      func(session.PlayerCommand)
 	OnUnpair       func()
 
-	// Output overrides the playback backend (PlayerV2 only). Nil = miniaudio.
+	// Output overrides the playback backend (Player only). Nil = miniaudio.
 	Output output.Output
 
-	// OnStateChange receives player state transitions (PlayerV2 only).
+	// OnStateChange receives player state transitions (Player only).
 	OnStateChange func(PlayerState)
 
-	// Reconnect controls automatic reconnection (PlayerV2 only).
+	// Reconnect controls automatic reconnection (Player only).
 	Reconnect ReconnectConfig
 }
 
-// ReceiverV2 is the audio side of the v2 client: encrypted connect + session
+// Receiver is the audio side of the client: encrypted connect + session
 // establishment, clock sync, stream lifecycle, decode and scheduling. It emits
 // decoded audio.Buffer values on Output() exactly like the legacy Receiver, so
 // it can be used by visualizers, DSP, or custom output backends.
-type ReceiverV2 struct {
-	config    V2Config
+type Receiver struct {
+	config    Config
 	conn      *secure.Conn
 	sess      *session.ClientSession
 	clockSync *sync.ClockSync
@@ -205,13 +205,13 @@ type ReceiverV2 struct {
 	pumpWG        stdsync.WaitGroup
 }
 
-// NewReceiverV2 builds a v2 client receiver. Identity is required.
-func NewReceiverV2(cfg V2Config) (*ReceiverV2, error) {
+// NewReceiver builds a client receiver. Identity is required.
+func NewReceiver(cfg Config) (*Receiver, error) {
 	if cfg.ServerAddr == "" {
-		return nil, fmt.Errorf("V2Config.ServerAddr is required")
+		return nil, fmt.Errorf("Config.ServerAddr is required")
 	}
 	if cfg.Identity == nil {
-		return nil, fmt.Errorf("V2Config.Identity is required")
+		return nil, fmt.Errorf("Config.Identity is required")
 	}
 	if cfg.BufferMs == 0 {
 		cfg.BufferMs = 500
@@ -220,18 +220,18 @@ func NewReceiverV2(cfg V2Config) (*ReceiverV2, error) {
 		cfg.BufferCapacity = 1048576
 	}
 	if cfg.SyncMonitorInterval <= 0 {
-		cfg.SyncMonitorInterval = defaultV2SyncMonitorInterval
+		cfg.SyncMonitorInterval = defaultSyncMonitorInterval
 	}
 	if cfg.SyncLossGrace <= 0 {
-		cfg.SyncLossGrace = defaultV2SyncLossGrace
+		cfg.SyncLossGrace = defaultSyncLossGrace
 	}
 	// The ClockSync staleness window must match the graceful-degradation grace,
 	// else CheckQuality reports QualityLost partway through each clock-sync
-	// cycle (see defaultV2SyncLossGrace) and the monitor oscillates pause/resume.
+	// cycle (see defaultSyncLossGrace) and the monitor oscillates pause/resume.
 	clockSync := sync.NewClockSync()
 	clockSync.SetStaleAfter(cfg.SyncLossGrace)
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ReceiverV2{
+	return &Receiver{
 		config:       cfg,
 		clockSync:    clockSync,
 		ctx:          ctx,
@@ -243,19 +243,19 @@ func NewReceiverV2(cfg V2Config) (*ReceiverV2, error) {
 }
 
 // Output returns the channel emitting decoded, time-stamped audio buffers.
-func (r *ReceiverV2) Output() <-chan audio.Buffer { return r.output }
+func (r *Receiver) Output() <-chan audio.Buffer { return r.output }
 
 // Done returns a channel closed when the connection is lost or the receiver
 // is closed. Callers can use it to drive reconnect loops.
-func (r *ReceiverV2) Done() <-chan struct{} { return r.ctx.Done() }
+func (r *Receiver) Done() <-chan struct{} { return r.ctx.Done() }
 
 // ClockSync returns this receiver's time-filter instance.
-func (r *ReceiverV2) ClockSync() *sync.ClockSync { return r.clockSync }
+func (r *Receiver) ClockSync() *sync.ClockSync { return r.clockSync }
 
 // Connect dials the server, runs the Noise handshake and session
 // establishment, verifies the player role was activated, performs an initial
 // clock-sync burst, and starts the background loops.
-func (r *ReceiverV2) Connect() error {
+func (r *Receiver) Connect() error {
 	u := url.URL{Scheme: "ws", Host: r.config.ServerAddr, Path: "/sendspin"}
 	log.Printf("connecting to %s", u.String())
 
@@ -342,7 +342,7 @@ func (r *ReceiverV2) Connect() error {
 // initial clock-sync burst, then report available and push the player state. It
 // is idempotent and may be called either from Connect (initial activate) or
 // from readLoop (a later role/pairing activation).
-func (r *ReceiverV2) activatePlayer() {
+func (r *Receiver) activatePlayer() {
 	r.stateMu.Lock()
 	if r.available {
 		r.stateMu.Unlock()
@@ -366,13 +366,13 @@ func (r *ReceiverV2) activatePlayer() {
 }
 
 // defaultResolvePSK is the handshake PSK selector used when
-// V2Config.ResolvePSK is nil. It honours the persistent pairing store,
+// Config.ResolvePSK is nil. It honours the persistent pairing store,
 // recording which category matched so the session layer can judge the activate
 // at the right trust level (long-term when a record matched; Sentinel
 // otherwise, which lets an unpaired server open a dynamic pairing-code
 // session). A miss returns false and the handshake falls back to the Sentinel
 // PSK.
-func (r *ReceiverV2) defaultResolvePSK(pskID string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
+func (r *Receiver) defaultResolvePSK(pskID string, _ secure.PSKCategoryCode) (secure.PSK, bool) {
 	r.stateMu.Lock()
 	r.matchedCat = session.PSKSentinel
 	r.stateMu.Unlock()
@@ -393,7 +393,7 @@ func (r *ReceiverV2) defaultResolvePSK(pskID string, _ secure.PSKCategoryCode) (
 // and returns the promoted session — which carries the player role. When the
 // activate did not declare pairing, the missing player role is reported as a
 // normal connect error.
-func (r *ReceiverV2) pairIfRequested(sess *session.ClientSession, hello session.ClientHello) (*session.ClientSession, error) {
+func (r *Receiver) pairIfRequested(sess *session.ClientSession, hello session.ClientHello) (*session.ClientSession, error) {
 	if sess.Activate.Pairing == nil {
 		// The server granted no roles and did not ask to pair. Include what it
 		// declared so an unexpected server behaviour (e.g. a server that wants
@@ -413,7 +413,7 @@ func (r *ReceiverV2) pairIfRequested(sess *session.ClientSession, hello session.
 // connection without a token (the code is the shared secret): it derives and
 // surfaces a code for the operator to enter on the server, then mints and
 // persists a long-term PSK.
-func (r *ReceiverV2) pairPIN(sess *session.ClientSession, hello session.ClientHello, pairingIndex int) (*session.ClientSession, error) {
+func (r *Receiver) pairPIN(sess *session.ClientSession, hello session.ClientHello, pairingIndex int) (*session.ClientSession, error) {
 	// The pairing flow reads the connection directly (it runs on the single
 	// readLoop goroutine). Mark it active so clockSyncLoop withholds bursts
 	// that would otherwise inject server/time frames into the pairing stream.
@@ -449,7 +449,7 @@ func (r *ReceiverV2) pairPIN(sess *session.ClientSession, hello session.ClientHe
 
 // finishPairing verifies the promoted session activated the player role and
 // records that this connection paired.
-func (r *ReceiverV2) finishPairing(after *session.ClientSession) (*session.ClientSession, error) {
+func (r *Receiver) finishPairing(after *session.ClientSession) (*session.ClientSession, error) {
 	if !hasRole(after.ActiveRoles, "player") {
 		return nil, fmt.Errorf("post-pairing session did not activate the player role (active_roles=%v)", after.ActiveRoles)
 	}
@@ -465,7 +465,7 @@ func (r *ReceiverV2) finishPairing(after *session.ClientSession) (*session.Clien
 // activation. The first pairing activate since the handshake (even when not the
 // first overall activate) gets index 1; each subsequent pairing activate takes
 // the next value, matching the server's own per-handshake count.
-func (r *ReceiverV2) nextPairingIndex() int {
+func (r *Receiver) nextPairingIndex() int {
 	r.stateMu.Lock()
 	r.pairingIndex++
 	idx := r.pairingIndex
@@ -476,10 +476,10 @@ func (r *ReceiverV2) nextPairingIndex() int {
 // syncUntilReady runs clock-sync bursts until the time filter has produced at
 // least one sample, or timeout elapses (a silent server just means the first
 // chunks may be dropped; playback still begins).
-func (r *ReceiverV2) syncUntilReady(timeout time.Duration) {
+func (r *Receiver) syncUntilReady(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for {
-		r.runTimeSyncBurst(V2TimeSyncBurstSize)
+		r.runTimeSyncBurst(TimeSyncBurstSize)
 		if rtt, _ := r.clockSync.GetStats(); rtt > 0 {
 			return
 		}
@@ -492,8 +492,8 @@ func (r *ReceiverV2) syncUntilReady(timeout time.Duration) {
 }
 
 // buildHello assembles the client/hello for this connection.
-func (r *ReceiverV2) buildHello() (session.ClientHello, session.PSKCategory) {
-	formats := buildV2Formats(r.config.PreferredCodec, r.config.MaxSampleRate, r.config.MaxBitDepth)
+func (r *Receiver) buildHello() (session.ClientHello, session.PSKCategory) {
+	formats := buildFormats(r.config.PreferredCodec, r.config.MaxSampleRate, r.config.MaxBitDepth)
 	hello := session.ClientHello{
 		Name: r.config.Name,
 		DeviceInfo: &session.DeviceInfo{
@@ -535,7 +535,7 @@ func (r *ReceiverV2) buildHello() (session.ClientHello, session.PSKCategory) {
 	return hello, cat
 }
 
-func buildV2Formats(preferredCodec string, maxSampleRate, maxBitDepth int) []session.AudioFormat {
+func buildFormats(preferredCodec string, maxSampleRate, maxBitDepth int) []session.AudioFormat {
 	all := []session.AudioFormat{
 		{Codec: "pcm", Channels: 2, SampleRate: 192000, BitDepth: 24},
 		{Codec: "pcm", Channels: 2, SampleRate: 176400, BitDepth: 24},
@@ -598,7 +598,7 @@ func pairingMethodName(p *session.Pairing) string {
 // SetVolume stores a local volume change and reports it to the server via
 // client/state (the server merges it into the group volume). Muted volume
 // changes are folded in but the mute bit stays set, per spec.
-func (r *ReceiverV2) SetVolume(volume int) {
+func (r *Receiver) SetVolume(volume int) {
 	if volume < 0 {
 		volume = 0
 	}
@@ -612,7 +612,7 @@ func (r *ReceiverV2) SetVolume(volume int) {
 }
 
 // SetMuted stores a local mute change and reports it to the server.
-func (r *ReceiverV2) SetMuted(muted bool) {
+func (r *Receiver) SetMuted(muted bool) {
 	r.stateMu.Lock()
 	r.muted = muted
 	r.stateMu.Unlock()
@@ -624,7 +624,7 @@ func (r *ReceiverV2) SetMuted(muted bool) {
 // enables those controls (spec: volume only applies when "volume" is in
 // supported_commands; a player advertising none reads as having no volume
 // control, so HA shows 0).
-var v2PlayerSupportedCommands = []string{
+var playerSupportedCommands = []string{
 	string(session.PlayerCmdVolume),
 	string(session.PlayerCmdMute),
 	string(session.PlayerCmdSetOutputDelay),
@@ -632,7 +632,7 @@ var v2PlayerSupportedCommands = []string{
 
 // sendPlayerState reports the player's full state (available, volume, mute,
 // timing) — the spec requires `available` on every client/state.
-func (r *ReceiverV2) sendPlayerState() error {
+func (r *Receiver) sendPlayerState() error {
 	if r.conn == nil {
 		return errors.New("not connected")
 	}
@@ -651,7 +651,7 @@ func (r *ReceiverV2) sendPlayerState() error {
 			MinBufferMs:       ptr(minb),
 			Volume:            &vol,
 			Muted:             &mut,
-			SupportedCommands: v2PlayerSupportedCommands,
+			SupportedCommands: playerSupportedCommands,
 		},
 	}
 	raw, err := session.Marshal(&state)
@@ -665,7 +665,7 @@ func ptr[T any](v T) *T { return &v }
 
 // readLoop drives the connection: JSON controls and binary role frames until
 // an error ends the connection.
-func (r *ReceiverV2) readLoop() {
+func (r *Receiver) readLoop() {
 	defer r.teardown()
 
 	for {
@@ -685,7 +685,7 @@ func (r *ReceiverV2) readLoop() {
 	}
 }
 
-func (r *ReceiverV2) handleControl(payload []byte) {
+func (r *Receiver) handleControl(payload []byte) {
 	msg, err := session.Parse(payload)
 	if err != nil {
 		log.Printf("parse control error: %v", err)
@@ -735,7 +735,7 @@ func (r *ReceiverV2) handleControl(payload []byte) {
 // re-sent ones, so the activation is adjudicated exactly like the initial one
 // before it is applied (goodbye 'pairing_required' / 'unauthorized', or
 // pair/abort for a disallowed pairing method).
-func (r *ReceiverV2) handleServerActivate(act *session.ServerActivate) {
+func (r *Receiver) handleServerActivate(act *session.ServerActivate) {
 	r.stateMu.Lock()
 	hello := r.hello
 	cat := r.cat
@@ -802,9 +802,9 @@ func (r *ReceiverV2) handleServerActivate(act *session.ServerActivate) {
 // spec: an unpaired-access (or other) admissibility failure sends
 // client/goodbye and closes the connection; a pairing-method failure sends
 // pair/abort and leaves the connection open for the server to retry.
-func (r *ReceiverV2) rejectActivate(v session.Verdict) {
+func (r *Receiver) rejectActivate(v session.Verdict) {
 	if v.Goodbye != "" {
-		if err := writeV2Goodbye(r.conn, v.Goodbye); err != nil {
+		if err := writeGoodbye(r.conn, v.Goodbye); err != nil {
 			log.Printf("send goodbye %s: %v", v.Goodbye, err)
 		}
 		log.Printf("server/activate rejected: goodbye %s", v.Goodbye)
@@ -822,7 +822,7 @@ func (r *ReceiverV2) rejectActivate(v session.Verdict) {
 	}
 }
 
-func (r *ReceiverV2) handleStreamStart(sp session.StreamStartPlayer) {
+func (r *Receiver) handleStreamStart(sp session.StreamStartPlayer) {
 	format := audio.Format{
 		Codec:      sp.Codec,
 		SampleRate: sp.SampleRate,
@@ -843,7 +843,7 @@ func (r *ReceiverV2) handleStreamStart(sp session.StreamStartPlayer) {
 		decoder, err = defaultDecoderFor(format)
 	}
 	if err != nil {
-		r.notify(fmt.Errorf("v2: create decoder for %s: %w", format.Codec, err))
+		r.notify(fmt.Errorf("create decoder for %s: %w", format.Codec, err))
 		return
 	}
 	if r.config.OnStreamStart != nil {
@@ -880,10 +880,10 @@ func (r *ReceiverV2) handleStreamStart(sp session.StreamStartPlayer) {
 	}
 
 	go newScheduler.Run()
-	go r.pumpSchedulerOutputV2(newCtx, newScheduler)
+	go r.pumpSchedulerOutput(newCtx, newScheduler)
 }
 
-func (r *ReceiverV2) handleStreamClear(clear session.StreamClear) {
+func (r *Receiver) handleStreamClear(clear session.StreamClear) {
 	r.streamMu.Lock()
 	sched := r.scheduler
 	r.streamMu.Unlock()
@@ -897,7 +897,7 @@ func (r *ReceiverV2) handleStreamClear(clear session.StreamClear) {
 	}
 }
 
-func (r *ReceiverV2) handleStreamEnd() {
+func (r *Receiver) handleStreamEnd() {
 	if r.config.OnStreamEnd != nil {
 		r.config.OnStreamEnd()
 	}
@@ -906,10 +906,10 @@ func (r *ReceiverV2) handleStreamEnd() {
 
 // handleAudioChunk parses the player-audio header and queues the raw chunk for
 // decodeLoop, so codec work never stalls network reads or client/time replies.
-func (r *ReceiverV2) handleAudioChunk(body []byte) {
+func (r *Receiver) handleAudioChunk(body []byte) {
 	ts, _, audioData, err := playback.ParseAudioChunk(body)
 	if err != nil {
-		r.notify(fmt.Errorf("v2: malformed audio chunk: %w", err))
+		r.notify(fmt.Errorf("malformed audio chunk: %w", err))
 		return
 	}
 
@@ -931,7 +931,7 @@ func (r *ReceiverV2) handleAudioChunk(body []byte) {
 
 // decodeLoop is the single FIFO decode worker: preserves chunk ordering and
 // keeps all codec CPU work off the read loop.
-func (r *ReceiverV2) decodeLoop() {
+func (r *Receiver) decodeLoop() {
 	for {
 		select {
 		case job := <-r.decodeCh:
@@ -944,7 +944,7 @@ func (r *ReceiverV2) decodeLoop() {
 
 // decodeAndSchedule decodes one raw chunk and schedules the result, guarded so
 // a chunk from a superseded stream is never injected into the active one.
-func (r *ReceiverV2) decodeAndSchedule(job decodeJob) {
+func (r *Receiver) decodeAndSchedule(job decodeJob) {
 	r.streamMu.Lock()
 	if job.StreamGen != r.streamGen || r.decoder == nil || r.scheduler == nil {
 		r.streamMu.Unlock()
@@ -956,7 +956,7 @@ func (r *ReceiverV2) decodeAndSchedule(job decodeJob) {
 
 	pcm, err := decoder.Decode(job.Data)
 	if err != nil {
-		r.notify(fmt.Errorf("v2: decode error: %w", err))
+		r.notify(fmt.Errorf("decode error: %w", err))
 		return
 	}
 	if len(pcm) == 0 {
@@ -973,7 +973,7 @@ func (r *ReceiverV2) decodeAndSchedule(job decodeJob) {
 	sched.Schedule(audio.Buffer{Timestamp: job.Timestamp, Samples: pcm, Format: job.Format})
 }
 
-func (r *ReceiverV2) handleServerState(st *session.ServerState) {
+func (r *Receiver) handleServerState(st *session.ServerState) {
 	if st.Metadata == nil {
 		return
 	}
@@ -1017,7 +1017,7 @@ func (r *ReceiverV2) handleServerState(st *session.ServerState) {
 
 // runTimeSyncBurst drives a sequential burst of client/time probes and feeds
 // the lowest-RTT sample into the time filter, per the spec.
-func (r *ReceiverV2) runTimeSyncBurst(size int) {
+func (r *Receiver) runTimeSyncBurst(size int) {
 	// Only one burst at a time (see syncBurstMu). The periodic clockSyncLoop
 	// keeps the filter fresh in steady state, so a concurrent caller that loses
 	// the lock can safely skip its own burst.
@@ -1075,7 +1075,7 @@ drain:
 	r.clockSync.ProcessSyncResponse(bestT1, bestT2, bestT3, bestT4)
 }
 
-func (r *ReceiverV2) clockSyncLoop() {
+func (r *Receiver) clockSyncLoop() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1085,7 +1085,7 @@ func (r *ReceiverV2) clockSyncLoop() {
 			// server/time replies don't collide with pairing messages (which
 			// are read directly from the stream).
 			if !r.pairingActive.Load() {
-				r.runTimeSyncBurst(V2TimeSyncBurstSize)
+				r.runTimeSyncBurst(TimeSyncBurstSize)
 			}
 		case <-r.ctx.Done():
 			return
@@ -1095,7 +1095,7 @@ func (r *ReceiverV2) clockSyncLoop() {
 
 // watchClockSync implements graceful degradation on clock-sync loss (same
 // semantics as the legacy Receiver).
-func (r *ReceiverV2) watchClockSync() {
+func (r *Receiver) watchClockSync() {
 	tick := r.config.SyncMonitorInterval
 	grace := r.config.SyncLossGrace
 	ticker := time.NewTicker(tick)
@@ -1123,7 +1123,7 @@ func (r *ReceiverV2) watchClockSync() {
 	}
 }
 
-func (r *ReceiverV2) pausePlayback() {
+func (r *Receiver) pausePlayback() {
 	r.streamMu.Lock()
 	sched := r.scheduler
 	r.streamMu.Unlock()
@@ -1134,7 +1134,7 @@ func (r *ReceiverV2) pausePlayback() {
 	r.notify(ErrSyncLost)
 }
 
-func (r *ReceiverV2) resumePlayback() {
+func (r *Receiver) resumePlayback() {
 	r.streamMu.Lock()
 	sched := r.scheduler
 	r.streamMu.Unlock()
@@ -1145,7 +1145,7 @@ func (r *ReceiverV2) resumePlayback() {
 	r.notify(ErrSyncRecovered)
 }
 
-func (r *ReceiverV2) pumpSchedulerOutputV2(ctx context.Context, sched *Scheduler) {
+func (r *Receiver) pumpSchedulerOutput(ctx context.Context, sched *Scheduler) {
 	defer r.pumpWG.Done()
 	for {
 		select {
@@ -1165,7 +1165,7 @@ func (r *ReceiverV2) pumpSchedulerOutputV2(ctx context.Context, sched *Scheduler
 }
 
 // stopStream tears down the active scheduler/decoder without closing output.
-func (r *ReceiverV2) stopStream() {
+func (r *Receiver) stopStream() {
 	r.streamMu.Lock()
 	sched := r.scheduler
 	dec := r.decoder
@@ -1187,7 +1187,7 @@ func (r *ReceiverV2) stopStream() {
 
 // teardown runs the drop/close path: stops the stream, cancels everything,
 // and notifies.
-func (r *ReceiverV2) teardown() {
+func (r *Receiver) teardown() {
 	r.connected.Store(false)
 	r.stopStream()
 	r.cancel()
@@ -1195,7 +1195,7 @@ func (r *ReceiverV2) teardown() {
 }
 
 // notify delivers an error to OnError or the log.
-func (r *ReceiverV2) notify(err error) {
+func (r *Receiver) notify(err error) {
 	if r.config.OnError != nil {
 		r.config.OnError(err)
 	} else {
@@ -1204,9 +1204,9 @@ func (r *ReceiverV2) notify(err error) {
 }
 
 // Close shuts the receiver down, free any stream first, then the connection.
-func (r *ReceiverV2) Close() error {
+func (r *Receiver) Close() error {
 	if r.conn != nil {
-		_ = writeV2Goodbye(r.conn, session.GoodbyeShutdown)
+		_ = writeGoodbye(r.conn, session.GoodbyeShutdown)
 	}
 	r.streamMu.Lock()
 	r.closingStreams = true
@@ -1228,7 +1228,7 @@ func (r *ReceiverV2) Close() error {
 	return nil
 }
 
-func writeV2Goodbye(conn *secure.Conn, reason session.GoodbyeReason) error {
+func writeGoodbye(conn *secure.Conn, reason session.GoodbyeReason) error {
 	raw, err := session.Marshal(&session.ClientGoodbye{Reason: reason})
 	if err != nil {
 		return err
@@ -1238,7 +1238,7 @@ func writeV2Goodbye(conn *secure.Conn, reason session.GoodbyeReason) error {
 
 // SendAvailability re-reports availability (e.g. entering/leaving external
 // source mode).
-func (r *ReceiverV2) SendAvailability(available bool) error {
+func (r *Receiver) SendAvailability(available bool) error {
 	r.stateMu.Lock()
 	r.available = available
 	r.stateMu.Unlock()
@@ -1246,7 +1246,7 @@ func (r *ReceiverV2) SendAvailability(available bool) error {
 }
 
 // SendControllerCommand sends a controller command (client/command).
-func (r *ReceiverV2) SendControllerCommand(cmd session.ControllerCommand) error {
+func (r *Receiver) SendControllerCommand(cmd session.ControllerCommand) error {
 	if !cmd.Command.Valid() {
 		return fmt.Errorf("invalid controller command %q", cmd.Command)
 	}
@@ -1260,7 +1260,7 @@ func (r *ReceiverV2) SendControllerCommand(cmd session.ControllerCommand) error 
 	return r.conn.WriteMessage(secure.MsgTypeJSON, raw)
 }
 
-// defaultDecoderFor maps a v2 wire format to its decoder.
+// defaultDecoderFor maps a wire format to its decoder.
 func defaultDecoderFor(format audio.Format) (decode.Decoder, error) {
 	switch format.Codec {
 	case "pcm":

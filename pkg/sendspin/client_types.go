@@ -1,5 +1,5 @@
 // ABOUTME: Shared client types — config, state, metadata, sentinel errors,
-// ABOUTME: and small helpers used by the v2 client (ReceiverV2/PlayerV2).
+// ABOUTME: and small helpers used by the client (Receiver/Player).
 package sendspin
 
 import (
@@ -66,7 +66,7 @@ type PlayerState struct {
 	Connected  bool
 }
 
-// Graceful-degradation sentinel errors delivered through V2Config.OnError.
+// Graceful-degradation sentinel errors delivered through Config.OnError.
 var (
 	// ErrSyncLost is reported when clock-sync quality has been lost past the
 	// grace window; playback pauses until recovery.

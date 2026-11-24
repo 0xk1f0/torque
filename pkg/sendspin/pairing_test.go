@@ -1,5 +1,5 @@
 // ABOUTME: End-to-end test of the dynamic pairing-code (PIN) flow through
-// ReceiverV2: a Sentinel-keyed peer that demands pairing, the client emitting
+// Receiver: a Sentinel-keyed peer that demands pairing, the client emitting
 // a code the operator enters on the server, promotion to long-term trust with
 // the player role, and persistence of the minted long-term PSK.
 package sendspin
@@ -18,11 +18,11 @@ import (
 	"github.com/coder/websocket"
 )
 
-// TestReceiverV2_DynamicPINPairing drives the dynamic pairing-code (PIN) flow
+// TestReceiver_DynamicPINPairing drives the dynamic pairing-code (PIN) flow
 // through the client: a Sentinel-keyed connection whose activate demands a
 // pairing code, the client emitting a 6-digit code the server consumes, and
 // the resulting long-term PSK persisted so a reconnect can authenticate.
-func TestReceiverV2_DynamicPINPairing(t *testing.T) {
+func TestReceiver_DynamicPINPairing(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
 	start := time.Now()
 	clock := func() int64 { return time.Since(start).Microseconds() }
@@ -41,7 +41,7 @@ func TestReceiverV2_DynamicPINPairing(t *testing.T) {
 			return
 		}
 		sess, err := session.EstablishServer(conn, session.ServerConfig{
-			ServerName:        "v2-pin-peer",
+			ServerName:        "pin-peer",
 			PSKCategory:       session.PSKSentinel,
 			InitialActivities: []session.Activity{session.ActivityPairing},
 			Pairing: func() *session.Pairing {
@@ -58,7 +58,7 @@ func TestReceiverV2_DynamicPINPairing(t *testing.T) {
 			Format:       string(session.PairingFormatDigits),
 			ProvideCode:  func() ([]byte, error) { return []byte(<-codeCh), nil },
 			Persist:      serverStore.PutRecord,
-			Resulting:    session.ServerConfig{ServerName: "v2-pin-peer", InitialActivities: []session.Activity{session.ActivityPlayback}},
+			Resulting:    session.ServerConfig{ServerName: "pin-peer", InitialActivities: []session.Activity{session.ActivityPlayback}},
 		})
 		if err != nil {
 			t.Logf("server pin pairing: %v", err)
@@ -106,17 +106,17 @@ func TestReceiverV2_DynamicPINPairing(t *testing.T) {
 	}
 	emitted := make(chan string, 1)
 
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:         addr,
 		Identity:           clientID,
-		Name:               "v2-pin-client",
+		Name:               "pin-client",
 		Store:              store,
 		PairingCodeEmitted: func(code string) { emitted <- code },
 		MaxSampleRate:      48000,
 		MaxBitDepth:        16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 	go func() {
@@ -140,7 +140,7 @@ func TestReceiverV2_DynamicPINPairing(t *testing.T) {
 	}()
 
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect (dynamic PIN): %v", err)
+		t.Fatalf("Receiver.Connect (dynamic PIN): %v", err)
 	}
 
 	// The client must surface exactly 6 digits.

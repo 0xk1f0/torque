@@ -67,18 +67,18 @@ func TestFileStore_MissingFileNoError(t *testing.T) {
 	}
 }
 
-// TestPlayerV2_RestoresVolumeFromStore verifies NewPlayerV2 picks up a saved
+// TestPlayer_RestoresVolumeFromStore verifies NewPlayer picks up a saved
 // volume/mute from the unified store, and that SetVolume/Mute persist so a
 // restart returns at the operator's chosen loudness.
-func TestPlayerV2_RestoresVolumeFromStore(t *testing.T) {
+func TestPlayer_RestoresVolumeFromStore(t *testing.T) {
 	store := mustStore(t, filepath.Join(t.TempDir(), "store.json"))
 	if err := store.PutPlayerState(VolumeState{Volume: 41, Muted: true}); err != nil {
 		t.Fatal(err)
 	}
 
-	p, err := NewPlayerV2(V2Config{Store: store})
+	p, err := NewPlayer(Config{Store: store})
 	if err != nil {
-		t.Fatalf("NewPlayerV2: %v", err)
+		t.Fatalf("NewPlayer: %v", err)
 	}
 	if st := p.Status(); st.Volume != 41 || !st.Muted {
 		t.Fatalf("restored state mismatch: %+v, want volume=41 muted=true", st)
@@ -96,9 +96,9 @@ func TestPlayerV2_RestoresVolumeFromStore(t *testing.T) {
 	}
 
 	// A brand-new player (as after a restart) restores the persisted value.
-	p2, err := NewPlayerV2(V2Config{Store: store, Reconnect: ReconnectConfig{Enabled: false}})
+	p2, err := NewPlayer(Config{Store: store, Reconnect: ReconnectConfig{Enabled: false}})
 	if err != nil {
-		t.Fatalf("NewPlayerV2 (restart): %v", err)
+		t.Fatalf("NewPlayer (restart): %v", err)
 	}
 	if st := p2.Status(); st.Volume != 62 || st.Muted {
 		t.Fatalf("restart restore mismatch: %+v, want volume=62 muted=false", st)
@@ -107,10 +107,10 @@ func TestPlayerV2_RestoresVolumeFromStore(t *testing.T) {
 	p2.Close()
 }
 
-// TestPlayerV2_NoStoreKeepsDefault ensures a player without a store starts at
+// TestPlayer_NoStoreKeepsDefault ensures a player without a store starts at
 // 100/off.
-func TestPlayerV2_NoStoreKeepsDefault(t *testing.T) {
-	p, err := NewPlayerV2(V2Config{Reconnect: ReconnectConfig{Enabled: false}})
+func TestPlayer_NoStoreKeepsDefault(t *testing.T) {
+	p, err := NewPlayer(Config{Reconnect: ReconnectConfig{Enabled: false}})
 	if err != nil {
 		t.Fatal(err)
 	}

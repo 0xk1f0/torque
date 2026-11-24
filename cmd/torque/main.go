@@ -1,9 +1,9 @@
 // ABOUTME: Entry point for the Sendspin client
-// ABOUTME: Thin CLI wrapper around pkg/sendspin.PlayerV2 on the encrypted wire
+// ABOUTME: Thin CLI wrapper around pkg/sendspin.Player on the encrypted wire
 //
 // Runtime dependencies on a Raspberry Pi: libopus0 and ALSA (install
 // libopus-dev + libasound2-dev to build, libopus0 at runtime). Cross builds
-// for armv7/armv6 are produced by the ".github/workflows/v2-client.yml"
+// for armv7/armv6 are produced by the ".github/workflows/client.yml"
 // pipeline; the armv6 build targets the Pi Zero / Zero W (use Debian's
 // arm-linux-gnueabihf toolchain with -march=armv6 so the C audio stack is
 // armv6 too, not just the Go code).
@@ -183,7 +183,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p, err := sendspin.NewPlayerV2(sendspin.V2Config{
+	p, err := sendspin.NewPlayer(sendspin.Config{
 		ServerAddr:     serverAddr,
 		Identity:       id,
 		Name:           playerName,

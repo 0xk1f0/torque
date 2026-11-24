@@ -1,4 +1,4 @@
-// ABOUTME: High-level spec-v2 Player — composes ReceiverV2 with an audio
+// ABOUTME: High-level Player — composes Receiver with an audio
 // ABOUTME: output backend, volume/mute, transport commands, and automatic
 // ABOUTME: reconnect with backoff.
 package sendspin
@@ -15,13 +15,13 @@ import (
 	"github.com/0xk1f0/torque/pkg/protocol/session"
 )
 
-// PlayerV2 plays audio from a spec-v2 server over the encrypted wire. It
+// Player plays audio from a server over the encrypted wire. It
 // mirrors the legacy Player's surface: Connect/Play/Pause/Stop/Seek,
-// SetVolume/Mute, Status, Close, and configurable reconnect. V2Config.Output
+// SetVolume/Mute, Status, Close, and configurable reconnect. Config.Output
 // selects the playback backend (nil = miniaudio default).
-type PlayerV2 struct {
-	config V2Config
-	recv   *ReceiverV2
+type Player struct {
+	config Config
+	recv   *Receiver
 	out    output.Output
 
 	// store persists client state (pairing + volume/mute) tied to the
@@ -37,8 +37,8 @@ type PlayerV2 struct {
 	capsResolved bool
 }
 
-// NewPlayerV2 builds a spec-v2 Player.
-func NewPlayerV2(config V2Config) (*PlayerV2, error) {
+// NewPlayer builds a Player.
+func NewPlayer(config Config) (*Player, error) {
 	if config.BufferMs == 0 {
 		config.BufferMs = 500
 	}
@@ -62,7 +62,7 @@ func NewPlayerV2(config V2Config) (*PlayerV2, error) {
 		}
 	}
 
-	return &PlayerV2{
+	return &Player{
 		config: config,
 		store:  config.Store,
 		ctx:    ctx,
@@ -77,7 +77,7 @@ func NewPlayerV2(config V2Config) (*PlayerV2, error) {
 }
 
 // Connect dials the server and starts the playback pipeline.
-func (p *PlayerV2) Connect() error {
+func (p *Player) Connect() error {
 	p.ensureCapsResolved()
 	cfg := p.config
 	cfg.OnStreamStart = p.onStreamStart
@@ -98,7 +98,7 @@ func (p *PlayerV2) Connect() error {
 	}
 	cfg.Output = nil
 
-	recv, err := NewReceiverV2(cfg)
+	recv, err := NewReceiver(cfg)
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func (p *PlayerV2) Connect() error {
 
 // ensureCapsResolved caps the advertised formats from the output device on
 // first use (as the legacy player does).
-func (p *PlayerV2) ensureCapsResolved() {
+func (p *Player) ensureCapsResolved() {
 	if p.capsResolved {
 		return
 	}
@@ -140,7 +140,7 @@ func (p *PlayerV2) ensureCapsResolved() {
 }
 
 // onStreamStart opens the output at the negotiated format.
-func (p *PlayerV2) onStreamStart(format audio.Format) {
+func (p *Player) onStreamStart(format audio.Format) {
 	p.stateMu.Lock()
 	if p.out == nil {
 		p.out = p.config.Output
@@ -152,7 +152,7 @@ func (p *PlayerV2) onStreamStart(format audio.Format) {
 	p.stateMu.Unlock()
 
 	if err := out.Open(format.SampleRate, format.Channels, format.BitDepth); err != nil {
-		p.notifyError(fmt.Errorf("v2: open output: %w", err))
+		p.notifyError(fmt.Errorf("open output: %w", err))
 		return
 	}
 	p.stateMu.Lock()
@@ -168,11 +168,11 @@ func (p *PlayerV2) onStreamStart(format audio.Format) {
 	p.notifyStateChange()
 }
 
-func (p *PlayerV2) onStreamEnd() {
+func (p *Player) onStreamEnd() {
 	p.setState(func(s *PlayerState) { s.State = "idle" })
 }
 
-func (p *PlayerV2) consumeAudio(recv *ReceiverV2) {
+func (p *Player) consumeAudio(recv *Receiver) {
 	for {
 		select {
 		case buf, ok := <-recv.Output():
@@ -184,7 +184,7 @@ func (p *PlayerV2) consumeAudio(recv *ReceiverV2) {
 			p.stateMu.Unlock()
 			if out != nil {
 				if err := out.Write(buf.Samples); err != nil {
-					p.notifyError(fmt.Errorf("v2: playback error: %w", err))
+					p.notifyError(fmt.Errorf("playback error: %w", err))
 				}
 			}
 		case <-recv.Done():
@@ -197,7 +197,7 @@ func (p *PlayerV2) consumeAudio(recv *ReceiverV2) {
 
 // runReconnectLoop supervises the active receiver and rebuilds it with
 // exponential backoff whenever its Done channel closes.
-func (p *PlayerV2) runReconnectLoop(initial *ReceiverV2) {
+func (p *Player) runReconnectLoop(initial *Receiver) {
 	current := initial
 	for {
 		select {
@@ -221,14 +221,14 @@ func (p *PlayerV2) runReconnectLoop(initial *ReceiverV2) {
 	}
 }
 
-func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
+func (p *Player) reconnectWithBackoff() (*Receiver, bool) {
 	cfg := p.config.Reconnect
 	delay := cfg.InitialDelay
 	attempt := 0
 	for {
 		attempt++
 		if cfg.MaxAttempts > 0 && attempt > cfg.MaxAttempts {
-			p.notifyError(fmt.Errorf("v2 reconnect: gave up after %d attempts", cfg.MaxAttempts))
+			p.notifyError(fmt.Errorf("reconnect: gave up after %d attempts", cfg.MaxAttempts))
 			return nil, false
 		}
 		jittered := jitter(delay, 0.2)
@@ -245,7 +245,7 @@ func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
 				cfg2.ServerAddr = addr
 			}
 		}
-		recv, err := NewReceiverV2(cfg2)
+		recv, err := NewReceiver(cfg2)
 		if err == nil && recv != nil {
 			if err = recv.Connect(); err == nil {
 				log.Printf("reconnect: connected to %s on attempt %d", cfg2.ServerAddr, attempt)
@@ -261,29 +261,29 @@ func (p *PlayerV2) reconnectWithBackoff() (*ReceiverV2, bool) {
 }
 
 // Play/Pause/Stop send controller commands.
-func (p *PlayerV2) Play() error  { return p.sendController(session.CmdPlay) }
-func (p *PlayerV2) Pause() error { return p.sendController(session.CmdPause) }
-func (p *PlayerV2) Stop() error  { return p.sendController(session.CmdStop) }
+func (p *Player) Play() error  { return p.sendController(session.CmdPlay) }
+func (p *Player) Pause() error { return p.sendController(session.CmdPause) }
+func (p *Player) Stop() error  { return p.sendController(session.CmdStop) }
 
 // Next / Previous send track commands.
-func (p *PlayerV2) Next() error     { return p.sendController(session.CmdNext) }
-func (p *PlayerV2) Previous() error { return p.sendController(session.CmdPrevious) }
+func (p *Player) Next() error     { return p.sendController(session.CmdNext) }
+func (p *Player) Previous() error { return p.sendController(session.CmdPrevious) }
 
 // Seek jumps to a position in ms.
-func (p *PlayerV2) Seek(positionMs int) error {
+func (p *Player) Seek(positionMs int) error {
 	return p.sendCtl(session.ControllerCommand{Command: session.CmdSeek, PositionMs: &positionMs})
 }
 
 // SeekRelative offsets the position by offsetMs.
-func (p *PlayerV2) SeekRelative(offsetMs int) error {
+func (p *Player) SeekRelative(offsetMs int) error {
 	return p.sendCtl(session.ControllerCommand{Command: session.CmdSeekRelative, OffsetMs: &offsetMs})
 }
 
-func (p *PlayerV2) sendController(cmd session.MediaCommand) error {
+func (p *Player) sendController(cmd session.MediaCommand) error {
 	return p.sendCtl(session.ControllerCommand{Command: cmd})
 }
 
-func (p *PlayerV2) sendCtl(cmd session.ControllerCommand) error {
+func (p *Player) sendCtl(cmd session.ControllerCommand) error {
 	p.stateMu.Lock()
 	recv := p.recv
 	p.stateMu.Unlock()
@@ -308,7 +308,7 @@ func (p *PlayerV2) sendCtl(cmd session.ControllerCommand) error {
 
 // SetVolume sets the local volume (0-100), persists it, and reports it to the
 // server.
-func (p *PlayerV2) SetVolume(volume int) error {
+func (p *Player) SetVolume(volume int) error {
 	if volume < 0 {
 		volume = 0
 	}
@@ -329,7 +329,7 @@ func (p *PlayerV2) SetVolume(volume int) error {
 	}
 	if p.store != nil {
 		if err := p.store.PutPlayerState(VolumeState{Volume: volume, Muted: muted}); err != nil {
-			p.notifyError(fmt.Errorf("v2: persist volume: %w", err))
+			p.notifyError(fmt.Errorf("persist volume: %w", err))
 		}
 	}
 	p.notifyStateChange()
@@ -337,7 +337,7 @@ func (p *PlayerV2) SetVolume(volume int) error {
 }
 
 // Mute sets local mute, persists it, and reports it to the server.
-func (p *PlayerV2) Mute(muted bool) error {
+func (p *Player) Mute(muted bool) error {
 	p.stateMu.Lock()
 	p.state.Muted = muted
 	out := p.out
@@ -355,7 +355,7 @@ func (p *PlayerV2) Mute(muted bool) error {
 	}
 	if p.store != nil {
 		if err := p.store.PutPlayerState(VolumeState{Volume: vol, Muted: muted}); err != nil {
-			p.notifyError(fmt.Errorf("v2: persist mute: %w", err))
+			p.notifyError(fmt.Errorf("persist mute: %w", err))
 		}
 	}
 	p.notifyStateChange()
@@ -365,7 +365,7 @@ func (p *PlayerV2) Mute(muted bool) error {
 // applyStateToReceiver pushes the current volume/mute into the active receiver
 // (if any), so the server is told the right loudness on first connect and after
 // every reconnect.
-func (p *PlayerV2) applyStateToReceiver() {
+func (p *Player) applyStateToReceiver() {
 	p.stateMu.Lock()
 	recv := p.recv
 	vol, mut := p.state.Volume, p.state.Muted
@@ -378,14 +378,14 @@ func (p *PlayerV2) applyStateToReceiver() {
 }
 
 // Status returns the current player state.
-func (p *PlayerV2) Status() PlayerState {
+func (p *Player) Status() PlayerState {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 	return p.state
 }
 
 // Close shuts the player down.
-func (p *PlayerV2) Close() error {
+func (p *Player) Close() error {
 	p.cancel()
 	p.stateMu.Lock()
 	recv := p.recv
@@ -401,14 +401,14 @@ func (p *PlayerV2) Close() error {
 	return nil
 }
 
-func (p *PlayerV2) setState(mut func(*PlayerState)) {
+func (p *Player) setState(mut func(*PlayerState)) {
 	p.stateMu.Lock()
 	mut(&p.state)
 	p.stateMu.Unlock()
 	p.notifyStateChange()
 }
 
-func (p *PlayerV2) notifyStateChange() {
+func (p *Player) notifyStateChange() {
 	p.stateMu.Lock()
 	s := p.state
 	p.stateMu.Unlock()
@@ -417,7 +417,7 @@ func (p *PlayerV2) notifyStateChange() {
 	}
 }
 
-func (p *PlayerV2) notifyError(err error) {
+func (p *Player) notifyError(err error) {
 	if p.config.OnError != nil {
 		p.config.OnError(err)
 	} else {

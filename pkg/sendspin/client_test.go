@@ -1,4 +1,4 @@
-// ABOUTME: End-to-end tests of the spec-v2 client (ReceiverV2/PlayerV2) against
+// ABOUTME: End-to-end tests of the client (Receiver/Player) against
 // ABOUTME: a minimal encrypted test peer built from the transport + session
 // ABOUTME: primitives — handshake, establish, clock sync, stream lifecycle.
 package sendspin
@@ -19,20 +19,20 @@ import (
 	"slices"
 )
 
-// v2TestPeer is a minimal encrypted Sendspin server built purely so the client
+// testPeer is a minimal encrypted Sendspin server built purely so the client
 // has someone to talk to: Noise server handshake, session establishment, and a
 // control loop that answers clock sync and, once the client reports available,
 // streams a short PCM tone. It exists only for tests; there is no server
 // product in this repository.
-type v2TestPeer struct {
+type testPeer struct {
 	hs *httptest.Server
 }
 
-// newV2TestPeer starts a peer the client is already paired with: the Noise
+// newTestPeer starts a peer the client is already paired with: the Noise
 // handshake is keyed on a shared long-term PSK and playback is activated
 // directly (no pairing needed). onAvailable receives true the first time the
 // client reports available:true.
-func newV2TestPeer(t *testing.T, longTerm secure.PSK, onAvailable func()) *v2TestPeer {
+func newTestPeer(t *testing.T, longTerm secure.PSK, onAvailable func()) *testPeer {
 	t.Helper()
 	serverID, err := secure.GenerateIdentity()
 	if err != nil {
@@ -52,10 +52,10 @@ func newV2TestPeer(t *testing.T, longTerm secure.PSK, onAvailable func()) *v2Tes
 		handlePeerConn(t, ws, serverID, longTerm, clock, onAvailable)
 	}))
 	t.Cleanup(hs.Close)
-	return &v2TestPeer{hs: hs}
+	return &testPeer{hs: hs}
 }
 
-func (p *v2TestPeer) url() string {
+func (p *testPeer) url() string {
 	return "ws" + strings.TrimPrefix(p.hs.URL, "http")
 }
 
@@ -112,7 +112,7 @@ func handlePeerConn(t *testing.T, ws *websocket.Conn, serverID *secure.Identity,
 		return
 	}
 	sess, err := session.EstablishServer(conn, session.ServerConfig{
-		ServerName:        "v2-test-peer",
+		ServerName:        "test-peer",
 		PSKCategory:       session.PSKLongTerm,
 		InitialActivities: []session.Activity{session.ActivityPlayback},
 		ChooseActiveRoles: func(session.ClientHello) []string { return []string{"player@v1"} },
@@ -166,15 +166,15 @@ func writeControl(conn *secure.Conn, v any) error {
 	return conn.WriteMessage(secure.MsgTypeJSON, raw)
 }
 
-// TestReceiverV2_EndToEndAudio connects ReceiverV2 to the encrypted test peer,
+// TestReceiver_EndToEndAudio connects Receiver to the encrypted test peer,
 // which streams a constant tone once the client reports available, and verifies
 // decoded buffers arrive with correct constants, sample counts, and ~20 ms
 // spaced timestamps.
-func peerAddr(peer *v2TestPeer) string {
+func peerAddr(peer *testPeer) string {
 	return strings.TrimSuffix(strings.TrimPrefix(peer.url(), "ws://"), "/")
 }
 
-func TestReceiverV2_EndToEndAudio(t *testing.T) {
+func TestReceiver_EndToEndAudio(t *testing.T) {
 	longTerm, err := secure.NewPSK()
 	if err != nil {
 		t.Fatal(err)
@@ -187,14 +187,14 @@ func TestReceiverV2_EndToEndAudio(t *testing.T) {
 		t.Fatalf("seed pairing store: %v", err)
 	}
 
-	peer := newV2TestPeer(t, longTerm, nil)
+	peer := newTestPeer(t, longTerm, nil)
 	addr := peerAddr(peer)
 
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:     addr,
 		Identity:       clientID,
-		Name:           "v2-loopback-client",
+		Name:           "loopback-client",
 		Store:          store,
 		BufferMs:       100,
 		BufferCapacity: 1 << 20,
@@ -202,7 +202,7 @@ func TestReceiverV2_EndToEndAudio(t *testing.T) {
 		MaxBitDepth:    16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 
@@ -219,7 +219,7 @@ func TestReceiverV2_EndToEndAudio(t *testing.T) {
 	}()
 
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect: %v", err)
+		t.Fatalf("Receiver.Connect: %v", err)
 	}
 
 	var got []sample
@@ -252,10 +252,10 @@ func TestReceiverV2_EndToEndAudio(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_SyncAndAvailability verifies the client completes clock sync
+// TestReceiver_SyncAndAvailability verifies the client completes clock sync
 // with the peer and that its availability reaches the peer (the precondition
 // for streaming).
-func TestReceiverV2_SyncAndAvailability(t *testing.T) {
+func TestReceiver_SyncAndAvailability(t *testing.T) {
 	available := make(chan struct{}, 1)
 	longTerm, _ := secure.NewPSK()
 	store, err := NewFileStore(t.TempDir() + "/pairings.json")
@@ -265,14 +265,14 @@ func TestReceiverV2_SyncAndAvailability(t *testing.T) {
 	if err := store.PutRecord(longTerm); err != nil {
 		t.Fatalf("seed pairing store: %v", err)
 	}
-	peer := newV2TestPeer(t, longTerm, func() { available <- struct{}{} })
+	peer := newTestPeer(t, longTerm, func() { available <- struct{}{} })
 	addr := peerAddr(peer)
 
 	clientID, _ := secure.GenerateIdentity()
-	recv, _ := NewReceiverV2(V2Config{
+	recv, _ := NewReceiver(Config{
 		ServerAddr:    addr,
 		Identity:      clientID,
-		Name:          "v2-sync-client",
+		Name:          "sync-client",
 		Store:         store,
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
@@ -284,7 +284,7 @@ func TestReceiverV2_SyncAndAvailability(t *testing.T) {
 	}()
 
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect: %v", err)
+		t.Fatalf("Receiver.Connect: %v", err)
 	}
 
 	waitFor(t, 3*time.Second, func() bool {
@@ -299,9 +299,9 @@ func TestReceiverV2_SyncAndAvailability(t *testing.T) {
 	}
 }
 
-// TestPlayerV2_VolumeMuteRoundTrip verifies local volume/mute state changes
+// TestPlayer_VolumeMuteRoundTrip verifies local volume/mute state changes
 // land in the player state.
-func TestPlayerV2_VolumeMuteRoundTrip(t *testing.T) {
+func TestPlayer_VolumeMuteRoundTrip(t *testing.T) {
 	longTerm, _ := secure.NewPSK()
 	store, err := NewFileStore(t.TempDir() + "/pairings.json")
 	if err != nil {
@@ -310,26 +310,26 @@ func TestPlayerV2_VolumeMuteRoundTrip(t *testing.T) {
 	if err := store.PutRecord(longTerm); err != nil {
 		t.Fatalf("seed pairing store: %v", err)
 	}
-	peer := newV2TestPeer(t, longTerm, nil)
+	peer := newTestPeer(t, longTerm, nil)
 	addr := peerAddr(peer)
 
 	clientID, _ := secure.GenerateIdentity()
-	p, err := NewPlayerV2(V2Config{
+	p, err := NewPlayer(Config{
 		ServerAddr:    addr,
 		Identity:      clientID,
-		Name:          "v2-player",
+		Name:          "player",
 		Store:         store,
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 		OnError:       func(error) {},
 	})
 	if err != nil {
-		t.Fatalf("NewPlayerV2: %v", err)
+		t.Fatalf("NewPlayer: %v", err)
 	}
 	defer p.Close()
 
 	if err := p.Connect(); err != nil {
-		t.Fatalf("PlayerV2.Connect: %v", err)
+		t.Fatalf("Player.Connect: %v", err)
 	}
 	if err := p.SetVolume(40); err != nil {
 		t.Fatal(err)
@@ -345,21 +345,21 @@ func TestPlayerV2_VolumeMuteRoundTrip(t *testing.T) {
 	}
 }
 
-// TestV2Client_HelloOffersSpecValidDynamicPairing guards against a pairing
+// TestClient_HelloOffersSpecValidDynamicPairing guards against a pairing
 // advertisement a strict server would not recognize. Per the Sendspin spec a
 // dynamic_pairing_code descriptor is only recognized when it declares both
 // out_channels and (non-empty) formats; lacking out_channels, a server
 // (e.g. Home Assistant / Music Assistant) treats the method as unrecognized
 // and never requests dynamic pairing.
-func TestV2Client_HelloOffersSpecValidDynamicPairing(t *testing.T) {
+func TestClient_HelloOffersSpecValidDynamicPairing(t *testing.T) {
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr: "127.0.0.1:9",
 		Identity:   clientID,
 		Name:       "hello-test",
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 
@@ -376,36 +376,36 @@ func TestV2Client_HelloOffersSpecValidDynamicPairing(t *testing.T) {
 	}
 }
 
-// TestV2Client_UnpairedAccessAdvertised guards the --unpaired-access wiring:
-// the V2Config.UnpairedAccess knob must reach the wire as the client/hello
+// TestClient_UnpairedAccessAdvertised guards the --unpaired-access wiring:
+// the Config.UnpairedAccess knob must reach the wire as the client/hello
 // unpaired_access flag. Off (the zero value, and the CLI default) advertises
 // enabled:false so a fresh client still requires dynamic pin-code pairing;
 // on advertises enabled:true so an unpaired server may open direct playback.
-func TestV2Client_UnpairedAccessAdvertised(t *testing.T) {
+func TestClient_UnpairedAccessAdvertised(t *testing.T) {
 	clientID, _ := secure.GenerateIdentity()
 
-	recvOff, err := NewReceiverV2(V2Config{
+	recvOff, err := NewReceiver(Config{
 		ServerAddr:     "127.0.0.1:9",
 		Identity:       clientID,
 		Name:           "unpaired-off",
 		UnpairedAccess: false, // explicit; also the zero-value default
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recvOff.Close()
 	if hello, _ := recvOff.buildHello(); hello.UnpairedAccess.Enabled {
 		t.Error("UnpairedAccess=false must advertise unpaired_access.enabled=false")
 	}
 
-	recvOn, err := NewReceiverV2(V2Config{
+	recvOn, err := NewReceiver(Config{
 		ServerAddr:     "127.0.0.1:9",
 		Identity:       clientID,
 		Name:           "unpaired-on",
 		UnpairedAccess: true,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recvOn.Close()
 	if hello, _ := recvOn.buildHello(); !hello.UnpairedAccess.Enabled {
@@ -413,14 +413,14 @@ func TestV2Client_UnpairedAccessAdvertised(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled exercises the
+// TestReceiver_LaterUnpairedPlaybackRejectedWhenDisabled exercises the
 // unpaired-access enforcement on a LATER server/activate — the flow servers
 // like Home Assistant use: hold the unpaired (Sentinel) connection at empty
 // activities, then later grant playback. The spec's admissibility rules apply
 // to every server/activate, so with unpaired access disabled the client MUST
 // reject the playback activation with client/goodbye 'pairing_required'
 // (spec §server/activate, rule 1) and close, instead of silently playing.
-func TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
+func TestReceiver_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
 	got := make(chan session.GoodbyeReason, 1)
 
@@ -435,7 +435,7 @@ func TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
 		}
 		// Initial activate: empty activities, no roles, no pairing.
 		if _, err := session.EstablishServer(conn, session.ServerConfig{
-			ServerName:        "v2-unpaired-reject-peer",
+			ServerName:        "unpaired-reject-peer",
 			PSKCategory:       session.PSKSentinel,
 			InitialActivities: nil,
 			ChooseActiveRoles: func(session.ClientHello) []string { return nil },
@@ -474,15 +474,15 @@ func TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
 
 	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:    addr,
 		Identity:      clientID,
-		Name:          "v2-unpaired-reject-client",
+		Name:          "unpaired-reject-client",
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 	go func() {
@@ -491,7 +491,7 @@ func TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
 	}()
 
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect: %v", err)
+		t.Fatalf("Receiver.Connect: %v", err)
 	}
 
 	select {
@@ -504,11 +504,11 @@ func TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled is the mirror case:
+// TestReceiver_LaterUnpairedPlaybackAdmittedWhenEnabled is the mirror case:
 // with unpaired access enabled, a later server/activate granting the player
 // role on an unpaired (Sentinel) connection is admissible and the client
 // activates (spec §unpaired-access). No pairing record exists in either test.
-func TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
+func TestReceiver_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
 	available := make(chan struct{}, 1)
 	start := time.Now()
@@ -524,7 +524,7 @@ func TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
 			return
 		}
 		if _, err := session.EstablishServer(conn, session.ServerConfig{
-			ServerName:        "v2-unpaired-admit-peer",
+			ServerName:        "unpaired-admit-peer",
 			PSKCategory:       session.PSKSentinel,
 			InitialActivities: nil,
 			ChooseActiveRoles: func(session.ClientHello) []string { return nil },
@@ -574,16 +574,16 @@ func TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
 
 	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:     addr,
 		Identity:       clientID,
-		Name:           "v2-unpaired-admit-client",
+		Name:           "unpaired-admit-client",
 		UnpairedAccess: true,
 		MaxSampleRate:  48000,
 		MaxBitDepth:    16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 	go func() {
@@ -592,7 +592,7 @@ func TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
 	}()
 
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect: %v", err)
+		t.Fatalf("Receiver.Connect: %v", err)
 	}
 
 	select {
@@ -604,13 +604,13 @@ func TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_EmptyActivateStaysConnected guards the fix for servers (e.g.
+// TestReceiver_EmptyActivateStaysConnected guards the fix for servers (e.g.
 // Home Assistant / Music Assistant) that hold an unpaired connection at an
 // empty server/activate — no roles, no pairing — until an operator drives
 // pairing or role activation. Connect must NOT treat that as a fatal error:
 // it returns successfully and the connection stays open awaiting a later
 // server/activate.
-func TestReceiverV2_EmptyActivateStaysConnected(t *testing.T) {
+func TestReceiver_EmptyActivateStaysConnected(t *testing.T) {
 	serverID, _ := secure.GenerateIdentity()
 	clientDone := make(chan struct{})
 
@@ -625,7 +625,7 @@ func TestReceiverV2_EmptyActivateStaysConnected(t *testing.T) {
 		}
 		// Initial activate: empty activities, no roles, no pairing.
 		if _, err := session.EstablishServer(conn, session.ServerConfig{
-			ServerName:        "v2-empty-peer",
+			ServerName:        "empty-peer",
 			PSKCategory:       session.PSKSentinel,
 			InitialActivities: nil,
 			ChooseActiveRoles: func(session.ClientHello) []string { return nil },
@@ -656,15 +656,15 @@ func TestReceiverV2_EmptyActivateStaysConnected(t *testing.T) {
 	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
 
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:    addr,
 		Identity:      clientID,
-		Name:          "v2-empty-client",
+		Name:          "empty-client",
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 	go func() {
@@ -674,7 +674,7 @@ func TestReceiverV2_EmptyActivateStaysConnected(t *testing.T) {
 
 	// The empty activate must not abort the connection.
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect with an empty activate: %v", err)
+		t.Fatalf("Receiver.Connect with an empty activate: %v", err)
 	}
 	if !recv.connected.Load() {
 		t.Error("client should remain connected after an empty activate")
@@ -687,25 +687,25 @@ func TestReceiverV2_EmptyActivateStaysConnected(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_ClockSyncGraceExceedsBurstInterval guards against the
+// TestReceiver_ClockSyncGraceExceedsBurstInterval guards against the
 // pause/resume oscillation: clockSyncLoop bursts every 10s, so the clock-loss
 // grace (and the ClockSync staleness window) must comfortably exceed that
 // interval. With a grace shorter than the cadence the receiver syncs at t=0,
 // the filter times out mid-cycle, playback pauses, then resumes at the next
 // burst — pausing again forever. After a successful sync the receiver must
 // still be fresh (not QualityLost) for most of a burst interval.
-func TestReceiverV2_ClockSyncGraceExceedsBurstInterval(t *testing.T) {
+func TestReceiver_ClockSyncGraceExceedsBurstInterval(t *testing.T) {
 	clientID, _ := secure.GenerateIdentity()
 
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:    "127.0.0.1:1",
 		Identity:      clientID,
-		Name:          "v2-sync-grace-client",
+		Name:          "sync-grace-client",
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 
@@ -730,23 +730,23 @@ func TestReceiverV2_ClockSyncGraceExceedsBurstInterval(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_BurstYieldsWhenAnotherInFlight guards the clock-sync burst
+// TestReceiver_BurstYieldsWhenAnotherInFlight guards the clock-sync burst
 // serialization: clockSyncLoop (periodic) and activatePlayer's syncUntilReady
 // can race to run a burst, and two concurrent bursts into the shared
 // timeSyncResp channel steal each other's replies (duplicated "sync sample
 // timed out" logs, multi-second RTT). A burst must yield immediately when
 // another is already in flight.
-func TestReceiverV2_BurstYieldsWhenAnotherInFlight(t *testing.T) {
+func TestReceiver_BurstYieldsWhenAnotherInFlight(t *testing.T) {
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:    "127.0.0.1:1",
 		Identity:      clientID,
-		Name:          "v2-burst-yield-client",
+		Name:          "burst-yield-client",
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 
@@ -756,7 +756,7 @@ func TestReceiverV2_BurstYieldsWhenAnotherInFlight(t *testing.T) {
 	recv.syncBurstMu.Lock()
 	done := make(chan struct{})
 	go func() {
-		recv.runTimeSyncBurst(V2TimeSyncBurstSize)
+		recv.runTimeSyncBurst(TimeSyncBurstSize)
 		close(done)
 	}()
 	select {
@@ -767,12 +767,12 @@ func TestReceiverV2_BurstYieldsWhenAnotherInFlight(t *testing.T) {
 	recv.syncBurstMu.Unlock()
 }
 
-// TestReceiverV2_AdvertisesSupportedCommands guards the player state's
+// TestReceiver_AdvertisesSupportedCommands guards the player state's
 // supported_commands: the spec makes it required and says volume only applies
 // when "volume" is advertised. A player that omits it reads as accepting no
 // controls in HA (volume stuck at 0). The reported list must include every
 // server→player verb this receiver handles (volume, mute, set_output_delay).
-func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
+func TestReceiver_AdvertisesSupportedCommands(t *testing.T) {
 	longTerm, _ := secure.NewPSK()
 	store, err := NewFileStore(t.TempDir() + "/pairings.json")
 	if err != nil {
@@ -800,7 +800,7 @@ func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
 			return
 		}
 		if _, err := session.EstablishServer(conn, session.ServerConfig{
-			ServerName:        "v2-test-peer",
+			ServerName:        "test-peer",
 			PSKCategory:       session.PSKLongTerm,
 			InitialActivities: []session.Activity{session.ActivityPlayback},
 			ChooseActiveRoles: func(session.ClientHello) []string { return []string{"player@v1"} },
@@ -838,16 +838,16 @@ func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
 
 	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:    addr,
 		Identity:      clientID,
-		Name:          "v2-cmd-client",
+		Name:          "cmd-client",
 		Store:         store,
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 	go func() {
@@ -856,7 +856,7 @@ func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
 	}()
 
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect: %v", err)
+		t.Fatalf("Receiver.Connect: %v", err)
 	}
 
 	select {
@@ -871,7 +871,7 @@ func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
 	}
 }
 
-// TestReceiverV2_LaterActivateSyncsClock exercises the path where the player
+// TestReceiver_LaterActivateSyncsClock exercises the path where the player
 // role is granted by a later server/activate (as Home Assistant does after
 // holding the connection empty), rather than by the initial activate. The
 // later activation must run on its own goroutine: activatePlayer performs the
@@ -880,7 +880,7 @@ func TestReceiverV2_AdvertisesSupportedCommands(t *testing.T) {
 // burst (the only reader is busy running it), so every probe times out and the
 // filter stays unsynced until the far-off periodic burst. This asserts the
 // filter converges promptly after activation.
-func TestReceiverV2_LaterActivateSyncsClock(t *testing.T) {
+func TestReceiver_LaterActivateSyncsClock(t *testing.T) {
 	longTerm, _ := secure.NewPSK()
 	store, err := NewFileStore(t.TempDir() + "/store.json")
 	if err != nil {
@@ -909,7 +909,7 @@ func TestReceiverV2_LaterActivateSyncsClock(t *testing.T) {
 			return
 		}
 		if _, err := session.EstablishServer(conn, session.ServerConfig{
-			ServerName:        "v2-later-peer",
+			ServerName:        "later-peer",
 			PSKCategory:       session.PSKLongTerm,
 			InitialActivities: []session.Activity{session.ActivityPlayback},
 			ChooseActiveRoles: func(session.ClientHello) []string { return []string{} },
@@ -961,16 +961,16 @@ func TestReceiverV2_LaterActivateSyncsClock(t *testing.T) {
 
 	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
 	clientID, _ := secure.GenerateIdentity()
-	recv, err := NewReceiverV2(V2Config{
+	recv, err := NewReceiver(Config{
 		ServerAddr:    addr,
 		Identity:      clientID,
-		Name:          "v2-later-client",
+		Name:          "later-client",
 		Store:         store,
 		MaxSampleRate: 48000,
 		MaxBitDepth:   16,
 	})
 	if err != nil {
-		t.Fatalf("NewReceiverV2: %v", err)
+		t.Fatalf("NewReceiver: %v", err)
 	}
 	defer recv.Close()
 	go func() {
@@ -978,7 +978,7 @@ func TestReceiverV2_LaterActivateSyncsClock(t *testing.T) {
 		}
 	}()
 	if err := recv.Connect(); err != nil {
-		t.Fatalf("ReceiverV2.Connect: %v", err)
+		t.Fatalf("Receiver.Connect: %v", err)
 	}
 
 	deadline := time.After(3 * time.Second)
