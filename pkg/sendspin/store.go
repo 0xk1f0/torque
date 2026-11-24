@@ -23,9 +23,9 @@ type VolumeState struct {
 	Muted bool `json:"muted"`
 }
 
-// ClientStore persists client state tied to the identity: pairing records and
-// player volume/mute. Both Receiver (pairing) and Player (volume/mute)
-// consume the same store.
+// ClientStore persists client state tied to the identity: pairing records, the
+// per-client pairing PSK, and player volume/mute. Both Receiver (pairing) and
+// Player (volume/mute) consume the same store.
 type ClientStore interface {
 	// LookupPSK returns the recorded long-term PSK whose psk_id matches
 	// pskID, and whether it was found. A psk_id held under a different
@@ -33,6 +33,8 @@ type ClientStore interface {
 	LookupPSK(pskID string) (secure.PSK, bool)
 	// PutRecord persists a long-term PSK (deduplicated by psk_id).
 	PutRecord(psk secure.PSK) error
+	// DeleteRecord removes the recorded long-term PSK identified by pskID.
+	DeleteRecord(pskID string) error
 
 	// PairingPSK returns the provisioned per-client pairing PSK and whether
 	// one exists.
@@ -121,6 +123,26 @@ func (s *FileStore) PutRecord(psk secure.PSK) error {
 		}
 	}
 	p.Pairings = append(p.Pairings, psk.String())
+	return s.save(p)
+}
+
+// DeleteRecord removes the recorded long-term PSK identified by pskID.
+func (s *FileStore) DeleteRecord(pskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, _ := s.loadPersisted()
+	kept := p.Pairings[:0]
+	for _, v := range p.Pairings {
+		existing, err := secure.ParsePSK(v)
+		if err == nil && existing.ID() == pskID {
+			continue
+		}
+		kept = append(kept, v)
+	}
+	if len(kept) == len(p.Pairings) {
+		return nil // nothing to remove
+	}
+	p.Pairings = kept
 	return s.save(p)
 }
 

@@ -175,3 +175,25 @@ func TestStore_PairingPSKGenerateOnce(t *testing.T) {
 		t.Error("SetPairingPSKIfAbsent clobbered the existing pairing PSK")
 	}
 }
+
+// TestStore_DeleteRecord removes exactly the long-term record by psk_id.
+func TestStore_DeleteRecord(t *testing.T) {
+	s := mustStore(t, t.TempDir()+"/store.json")
+	a := mustPSK(t)
+	b := mustPSK(t)
+	if err := s.PutRecord(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutRecord(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteRecord(a.ID()); err != nil {
+		t.Fatalf("DeleteRecord: %v", err)
+	}
+	if _, ok := s.LookupPSK(a.ID()); ok {
+		t.Error("deleted record still resolves")
+	}
+	if psk, ok := s.LookupPSK(b.ID()); !ok || psk != b {
+		t.Error("unrelated record was removed")
+	}
+}

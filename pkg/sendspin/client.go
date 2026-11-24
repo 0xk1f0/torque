@@ -819,13 +819,39 @@ func (r *Receiver) handleControl(payload []byte) {
 	case *session.ServerActivate:
 		r.handleServerActivate(v)
 	case *session.ServerUnpair:
-		log.Printf("server unpairing this client")
-		if r.config.OnUnpair != nil {
-			r.config.OnUnpair()
-		}
+		r.handleUnpair()
 	default:
 		// Forward tolerance: ignore unrecognized messages.
 	}
+}
+
+// handleUnpair implements the spec's server/unpair client behavior: an
+// unpaired session ignores it; a paired one removes the matched pairing
+// record, sends client/goodbye reason 'unpaired', and closes the connection.
+func (r *Receiver) handleUnpair() {
+	r.stateMu.Lock()
+	cat := r.cat
+	pskID := r.activePskID
+	r.stateMu.Unlock()
+
+	if cat != session.PSKLongTerm {
+		log.Printf("server/unpair ignored on a %s session", cat)
+		return
+	}
+	log.Printf("server unpairing this client")
+
+	if r.config.Store != nil && pskID != "" {
+		if err := r.config.Store.DeleteRecord(pskID); err != nil {
+			log.Printf("delete pairing record %s: %v", pskID, err)
+		}
+	}
+	if err := writeGoodbye(r.conn, session.GoodbyeUnpaired); err != nil {
+		log.Printf("send goodbye unpaired: %v", err)
+	}
+	if r.config.OnUnpair != nil {
+		r.config.OnUnpair()
+	}
+	_ = r.conn.Close()
 }
 
 // handleServerActivate processes a server/activate received after the initial

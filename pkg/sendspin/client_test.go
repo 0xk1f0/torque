@@ -1096,3 +1096,184 @@ func TestControllerCommandGating(t *testing.T) {
 		t.Error("volume must be rejected when not in supported_commands")
 	}
 }
+
+// TestReceiver_ServerUnpair_PairedRemovesRecordAndCloses drives the spec's
+// server/unpair client behavior on a paired session: the record is removed,
+// client/goodbye 'unpaired' is sent, and the connection closes.
+func TestReceiver_ServerUnpair_PairedRemovesRecordAndCloses(t *testing.T) {
+	longTerm, _ := secure.NewPSK()
+	store, err := NewFileStore(t.TempDir() + "/s.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutRecord(longTerm); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan session.GoodbyeReason, 1)
+	serverID, _ := secure.GenerateIdentity()
+	start := time.Now()
+	clock := func() int64 { return time.Since(start).Microseconds() }
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{
+			Identity: serverID,
+			SelectPSK: func(string) (secure.PSK, secure.PSKCategoryCode, error) {
+				return longTerm, secure.CategoryLongTerm, nil
+			},
+		})
+		if err != nil {
+			return
+		}
+		sess, err := session.EstablishServer(conn, session.ServerConfig{
+			ServerName:        "unpair-peer",
+			PSKCategory:       session.PSKLongTerm,
+			InitialActivities: []session.Activity{session.ActivityPlayback},
+			ChooseActiveRoles: func(session.ClientHello) []string { return []string{"player@v1"} },
+		})
+		if err != nil {
+			return
+		}
+		// Once the session is established, ask the client to drop the record.
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_ = writeControl(sess.Conn, session.ServerUnpair{})
+		}()
+		for {
+			msgType, payload, err := sess.Conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if msgType != secure.MsgTypeJSON {
+				continue
+			}
+			msg, err := session.Parse(payload)
+			if err != nil {
+				continue
+			}
+			switch v := msg.(type) {
+			case *session.ClientTime:
+				_ = writeControl(sess.Conn, session.ServerTime{
+					ClientTransmitted: v.ClientTransmitted,
+					ServerReceived:    clock(),
+					ServerTransmitted: clock(),
+				})
+			case *session.ClientGoodbye:
+				got <- v.Reason
+				return
+			}
+		}
+	}))
+	defer hs.Close()
+
+	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
+	clientID, _ := secure.GenerateIdentity()
+	recv, err := NewReceiver(Config{
+		ServerAddr: addr,
+		Identity:   clientID,
+		Name:       "unpair-paired-client",
+		Store:      store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+	go func() {
+		for range recv.Output() {
+		}
+	}()
+
+	if err := recv.Connect(); err != nil {
+		t.Fatalf("Receiver.Connect: %v", err)
+	}
+
+	select {
+	case reason := <-got:
+		if reason != session.GoodbyeUnpaired {
+			t.Errorf("goodbye = %q, want unpaired", reason)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("peer never received client/goodbye 'unpaired'")
+	}
+
+	waitFor(t, 3*time.Second, func() bool { return !recv.connected.Load() }, "connection did not close after server/unpair")
+	if _, ok := store.LookupPSK(longTerm.ID()); ok {
+		t.Error("pairing record was not removed on server/unpair")
+	}
+}
+
+// TestReceiver_ServerUnpair_UnpairedIgnored verifies an unpaired session
+// ignores server/unpair and keeps the connection open.
+func TestReceiver_ServerUnpair_UnpairedIgnored(t *testing.T) {
+	clientDone := make(chan struct{})
+	serverID, _ := secure.GenerateIdentity()
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{Identity: serverID})
+		if err != nil {
+			return
+		}
+		if _, err := session.EstablishServer(conn, session.ServerConfig{
+			ServerName:        "unpair-ignored-peer",
+			PSKCategory:       session.PSKSentinel,
+			InitialActivities: nil,
+			ChooseActiveRoles: func(session.ClientHello) []string { return nil },
+		}); err != nil {
+			return
+		}
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_ = writeControl(conn, session.ServerUnpair{})
+		}()
+		for {
+			msgType, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if msgType != secure.MsgTypeJSON {
+				continue
+			}
+			if msg, err := session.Parse(payload); err == nil {
+				if _, ok := msg.(*session.ClientGoodbye); ok {
+					close(clientDone)
+					return
+				}
+			}
+		}
+	}))
+	defer hs.Close()
+
+	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
+	clientID, _ := secure.GenerateIdentity()
+	recv, err := NewReceiver(Config{ServerAddr: addr, Identity: clientID, Name: "unpair-sentinel-client"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+	go func() {
+		for range recv.Output() {
+		}
+	}()
+
+	if err := recv.Connect(); err != nil {
+		t.Fatalf("Receiver.Connect: %v", err)
+	}
+
+	// The peer marks a spurious goodbye; a real close also drops the
+	// connection. Give server/unpair time to be processed and assert the
+	// client is still connected and never said goodbye.
+	select {
+	case <-clientDone:
+		t.Fatal("unpaired client sent a goodbye instead of ignoring server/unpair")
+	case <-time.After(1 * time.Second):
+	}
+	if !recv.connected.Load() {
+		t.Error("client closed the connection instead of ignoring server/unpair on an unpaired session")
+	}
+}
