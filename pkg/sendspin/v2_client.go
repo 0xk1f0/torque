@@ -168,6 +168,12 @@ type ReceiverV2 struct {
 	// connection (set by defaultResolvePSK; 0 when the caller supplied a
 	// custom ResolvePSK). guarded by stateMu.
 	matchedCat session.PSKCategory
+	// cat is the PSK category the current session is keyed on: the category
+	// used to establish the session (Sentinel unless a pairing record
+	// matched), promoted to long-term after a successful pairing. It is what
+	// every server/activate, including re-sent ones, is adjudicated under.
+	// guarded by stateMu.
+	cat session.PSKCategory
 	// paired records that this connection went through the pairing_psk flow.
 	// guarded by stateMu.
 	paired bool
@@ -300,6 +306,12 @@ func (r *ReceiverV2) Connect() error {
 
 	r.stateMu.Lock()
 	r.hello = hello
+	// When the server asked us to pair right after connect, the pairing flow
+	// already promoted cat to long-term (finishPairing) — don't clobber it
+	// with the pre-pairing category.
+	if !r.paired {
+		r.cat = cat
+	}
 	r.stateMu.Unlock()
 	r.conn = conn
 	r.sess = sess
@@ -443,6 +455,7 @@ func (r *ReceiverV2) finishPairing(after *session.ClientSession) (*session.Clien
 	}
 	r.stateMu.Lock()
 	r.paired = true
+	r.cat = session.PSKLongTerm
 	r.stateMu.Unlock()
 	log.Printf("paired with %s", after.ServerName)
 	return after, nil
@@ -717,14 +730,46 @@ func (r *ReceiverV2) handleControl(payload []byte) {
 // server drives later (dynamic pairing-code), and goes available once the
 // player role activates. Servers like Home Assistant often hold an unpaired
 // connection at empty activities and only afterwards drive pairing or roles.
+//
+// The spec's admissibility rules apply to every server/activate, including
+// re-sent ones, so the activation is adjudicated exactly like the initial one
+// before it is applied (goodbye 'pairing_required' / 'unauthorized', or
+// pair/abort for a disallowed pairing method).
 func (r *ReceiverV2) handleServerActivate(act *session.ServerActivate) {
 	r.stateMu.Lock()
-	r.sess.Activate = *act
-	roles := r.sess.ActiveRoles
+	hello := r.hello
+	cat := r.cat
+	persisted := r.sess.ActiveRoles
+	r.stateMu.Unlock()
+
+	// Effective roles this activation yields, applying the spec's rule that
+	// when a later activation omits active_roles and the connection is no
+	// longer playback-capable, the persisted roles are treated as empty
+	// rather than the message rejected.
+	roles := persisted
 	if act.ActiveRoles != nil {
 		roles = *act.ActiveRoles
+	} else if !session.PlaybackCapable(cat, act.Activities, hello.UnpairedAccess.Enabled) {
+		roles = nil
 	}
-	hello := r.hello
+
+	methods := make([]string, 0, len(hello.SupportedPairMethods))
+	for m := range hello.SupportedPairMethods {
+		methods = append(methods, m)
+	}
+	verdict := session.JudgeActivate(cat, *act, session.ClientAdmissionState{
+		UnpairedAccessEnabled: hello.UnpairedAccess.Enabled,
+		OfferedPairMethods:    methods,
+		ActiveRolesInEffect:   roles,
+	})
+	if !verdict.OK {
+		r.rejectActivate(verdict)
+		return
+	}
+
+	r.stateMu.Lock()
+	r.sess.Activate = *act
+	r.sess.ActiveRoles = roles
 	r.stateMu.Unlock()
 
 	if act.Pairing != nil {
@@ -739,10 +784,6 @@ func (r *ReceiverV2) handleServerActivate(act *session.ServerActivate) {
 		r.sess = after
 		roles = after.ActiveRoles
 		r.stateMu.Unlock()
-	} else {
-		r.stateMu.Lock()
-		r.sess.ActiveRoles = roles
-		r.stateMu.Unlock()
 	}
 
 	if hasRole(roles, "player") {
@@ -756,6 +797,31 @@ func (r *ReceiverV2) handleServerActivate(act *session.ServerActivate) {
 		go r.activatePlayer()
 	}
 }
+
+// rejectActivate answers an inadmissible server/activate exactly per the
+// spec: an unpaired-access (or other) admissibility failure sends
+// client/goodbye and closes the connection; a pairing-method failure sends
+// pair/abort and leaves the connection open for the server to retry.
+func (r *ReceiverV2) rejectActivate(v session.Verdict) {
+	if v.Goodbye != "" {
+		if err := writeV2Goodbye(r.conn, v.Goodbye); err != nil {
+			log.Printf("send goodbye %s: %v", v.Goodbye, err)
+		}
+		log.Printf("server/activate rejected: goodbye %s", v.Goodbye)
+		_ = r.conn.Close()
+		return
+	}
+	if v.PairAbort != "" {
+		raw, err := session.Marshal(&session.PairAbort{Reason: string(v.PairAbort)})
+		if err == nil {
+			if err := r.conn.WriteMessage(secure.MsgTypeJSON, raw); err != nil {
+				log.Printf("send pair/abort: %v", err)
+			}
+		}
+		log.Printf("pairing activation aborted: %s (leaving connection open)", v.PairAbort)
+	}
+}
+
 func (r *ReceiverV2) handleStreamStart(sp session.StreamStartPlayer) {
 	format := audio.Format{
 		Codec:      sp.Codec,

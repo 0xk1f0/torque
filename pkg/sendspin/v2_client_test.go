@@ -413,6 +413,197 @@ func TestV2Client_UnpairedAccessAdvertised(t *testing.T) {
 	}
 }
 
+// TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled exercises the
+// unpaired-access enforcement on a LATER server/activate — the flow servers
+// like Home Assistant use: hold the unpaired (Sentinel) connection at empty
+// activities, then later grant playback. The spec's admissibility rules apply
+// to every server/activate, so with unpaired access disabled the client MUST
+// reject the playback activation with client/goodbye 'pairing_required'
+// (spec §server/activate, rule 1) and close, instead of silently playing.
+func TestReceiverV2_LaterUnpairedPlaybackRejectedWhenDisabled(t *testing.T) {
+	serverID, _ := secure.GenerateIdentity()
+	got := make(chan session.GoodbyeReason, 1)
+
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{Identity: serverID})
+		if err != nil {
+			return
+		}
+		// Initial activate: empty activities, no roles, no pairing.
+		if _, err := session.EstablishServer(conn, session.ServerConfig{
+			ServerName:        "v2-unpaired-reject-peer",
+			PSKCategory:       session.PSKSentinel,
+			InitialActivities: nil,
+			ChooseActiveRoles: func(session.ClientHello) []string { return nil },
+		}); err != nil {
+			return
+		}
+		// After Connect has returned (empty activate → readLoop running),
+		// drive a later server/activate that grants playback unpaired.
+		go func() {
+			time.Sleep(250 * time.Millisecond)
+			roles := []string{"player@v1"}
+			_ = writeControl(conn, session.ServerActivate{
+				Activities:  []session.Activity{session.ActivityPlayback},
+				ActiveRoles: &roles,
+			})
+		}()
+		for {
+			msgType, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if msgType != secure.MsgTypeJSON {
+				continue
+			}
+			msg, err := session.Parse(payload)
+			if err != nil {
+				continue
+			}
+			if gb, ok := msg.(*session.ClientGoodbye); ok {
+				got <- gb.Reason
+				return
+			}
+		}
+	}))
+	defer hs.Close()
+
+	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
+	clientID, _ := secure.GenerateIdentity()
+	recv, err := NewReceiverV2(V2Config{
+		ServerAddr:    addr,
+		Identity:      clientID,
+		Name:          "v2-unpaired-reject-client",
+		MaxSampleRate: 48000,
+		MaxBitDepth:   16,
+	})
+	if err != nil {
+		t.Fatalf("NewReceiverV2: %v", err)
+	}
+	defer recv.Close()
+	go func() {
+		for range recv.Output() {
+		}
+	}()
+
+	if err := recv.Connect(); err != nil {
+		t.Fatalf("ReceiverV2.Connect: %v", err)
+	}
+
+	select {
+	case reason := <-got:
+		if reason != session.GoodbyePairingRequired {
+			t.Errorf("later unpaired playback with unpaired-access off: goodbye = %q, want pairing_required", reason)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not reject later unpaired playback with goodbye pairing_required")
+	}
+}
+
+// TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled is the mirror case:
+// with unpaired access enabled, a later server/activate granting the player
+// role on an unpaired (Sentinel) connection is admissible and the client
+// activates (spec §unpaired-access). No pairing record exists in either test.
+func TestReceiverV2_LaterUnpairedPlaybackAdmittedWhenEnabled(t *testing.T) {
+	serverID, _ := secure.GenerateIdentity()
+	available := make(chan struct{}, 1)
+	start := time.Now()
+	clock := func() int64 { return time.Since(start).Microseconds() }
+
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{Identity: serverID})
+		if err != nil {
+			return
+		}
+		if _, err := session.EstablishServer(conn, session.ServerConfig{
+			ServerName:        "v2-unpaired-admit-peer",
+			PSKCategory:       session.PSKSentinel,
+			InitialActivities: nil,
+			ChooseActiveRoles: func(session.ClientHello) []string { return nil },
+		}); err != nil {
+			return
+		}
+		go func() {
+			time.Sleep(250 * time.Millisecond)
+			roles := []string{"player@v1"}
+			_ = writeControl(conn, session.ServerActivate{
+				Activities:  []session.Activity{session.ActivityPlayback},
+				ActiveRoles: &roles,
+			})
+		}()
+		for {
+			msgType, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if msgType != secure.MsgTypeJSON {
+				continue
+			}
+			msg, err := session.Parse(payload)
+			if err != nil {
+				continue
+			}
+			switch v := msg.(type) {
+			case *session.ClientTime:
+				_ = writeControl(conn, session.ServerTime{
+					ClientTransmitted: v.ClientTransmitted,
+					ServerReceived:    clock(),
+					ServerTransmitted: clock(),
+				})
+			case *session.ClientState:
+				if v.Available {
+					select {
+					case available <- struct{}{}:
+					default:
+					}
+				}
+			case *session.ClientGoodbye:
+				return
+			}
+		}
+	}))
+	defer hs.Close()
+
+	addr := strings.TrimSuffix(strings.TrimPrefix("ws"+strings.TrimPrefix(hs.URL, "http"), "ws://"), "/")
+	clientID, _ := secure.GenerateIdentity()
+	recv, err := NewReceiverV2(V2Config{
+		ServerAddr:     addr,
+		Identity:       clientID,
+		Name:           "v2-unpaired-admit-client",
+		UnpairedAccess: true,
+		MaxSampleRate:  48000,
+		MaxBitDepth:    16,
+	})
+	if err != nil {
+		t.Fatalf("NewReceiverV2: %v", err)
+	}
+	defer recv.Close()
+	go func() {
+		for range recv.Output() {
+		}
+	}()
+
+	if err := recv.Connect(); err != nil {
+		t.Fatalf("ReceiverV2.Connect: %v", err)
+	}
+
+	select {
+	case <-available:
+		// The later unpaired playback activation was admitted and the player
+		// went available — good.
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not go available after an admitted later unpaired playback activation")
+	}
+}
+
 // TestReceiverV2_EmptyActivateStaysConnected guards the fix for servers (e.g.
 // Home Assistant / Music Assistant) that hold an unpaired connection at an
 // empty server/activate — no roles, no pairing — until an operator drives
