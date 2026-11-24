@@ -1015,6 +1015,10 @@ func (r *Receiver) handleStreamStart(sp session.StreamStartPlayer) {
 func (r *Receiver) handleStreamClear(clear session.StreamClear) {
 	r.streamMu.Lock()
 	sched := r.scheduler
+	// Retire the current generation so raw chunks queued for async decode
+	// before this clear cannot be decoded into the cleared buffer after it:
+	// a seek/jump must not resurrect pre-jump audio from the decode pipeline.
+	r.streamGen++
 	r.streamMu.Unlock()
 	if sched == nil {
 		return
