@@ -376,6 +376,43 @@ func TestV2Client_HelloOffersSpecValidDynamicPairing(t *testing.T) {
 	}
 }
 
+// TestV2Client_UnpairedAccessAdvertised guards the --unpaired-access wiring:
+// the V2Config.UnpairedAccess knob must reach the wire as the client/hello
+// unpaired_access flag. Off (the zero value, and the CLI default) advertises
+// enabled:false so a fresh client still requires dynamic pin-code pairing;
+// on advertises enabled:true so an unpaired server may open direct playback.
+func TestV2Client_UnpairedAccessAdvertised(t *testing.T) {
+	clientID, _ := secure.GenerateIdentity()
+
+	recvOff, err := NewReceiverV2(V2Config{
+		ServerAddr:     "127.0.0.1:9",
+		Identity:       clientID,
+		Name:           "unpaired-off",
+		UnpairedAccess: false, // explicit; also the zero-value default
+	})
+	if err != nil {
+		t.Fatalf("NewReceiverV2: %v", err)
+	}
+	defer recvOff.Close()
+	if hello, _ := recvOff.buildHello(); hello.UnpairedAccess.Enabled {
+		t.Error("UnpairedAccess=false must advertise unpaired_access.enabled=false")
+	}
+
+	recvOn, err := NewReceiverV2(V2Config{
+		ServerAddr:     "127.0.0.1:9",
+		Identity:       clientID,
+		Name:           "unpaired-on",
+		UnpairedAccess: true,
+	})
+	if err != nil {
+		t.Fatalf("NewReceiverV2: %v", err)
+	}
+	defer recvOn.Close()
+	if hello, _ := recvOn.buildHello(); !hello.UnpairedAccess.Enabled {
+		t.Error("UnpairedAccess=true must advertise unpaired_access.enabled=true")
+	}
+}
+
 // TestReceiverV2_EmptyActivateStaysConnected guards the fix for servers (e.g.
 // Home Assistant / Music Assistant) that hold an unpaired connection at an
 // empty server/activate — no roles, no pairing — until an operator drives

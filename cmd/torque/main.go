@@ -36,6 +36,7 @@ var (
 	bufferCapacity int
 	maxSampleRate  int
 	maxBitDepth    int
+	unpairedAccess bool
 	showVersion    bool
 	deviceName     string
 	listDevices    bool
@@ -62,6 +63,7 @@ func init() {
 	flag.IntVar(&maxSampleRate, "max-sample-rate", 0, "Cap the highest sample rate advertised to the server. 0 = no cap.")
 	flag.IntVar(&maxBitDepth, "max-bit-depth", 0, "Cap the highest bit depth advertised to the server. 0 = no cap.")
 
+	flag.BoolVar(&unpairedAccess, "unpaired-access", false, "Admit unpaired servers: let a server this client has not paired with play audio without going through dynamic pin-code pairing. Off by default (pairing required). Enable only for servers without pairing support.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.BoolVar(&showVersion, "v", false, "shorthand for --version")
 
@@ -86,6 +88,8 @@ Options (long forms accept a double dash; aliases are single dash):
        --buffer-capacity <b>    buffer_capacity advertised to the server in bytes (default 1MB)
        --max-sample-rate <hz>   Cap the highest sample rate advertised to the server. 0 = no cap.
        --max-bit-depth <bits>   Cap the highest bit depth advertised to the server. 0 = no cap.
+       --unpaired-access        Admit unpaired servers (play without dynamic pin-code pairing).
+                                Off by default; enable only for servers without pairing support.
   -l,  --list-devices           Enumerate the playback devices miniaudio/ALSA can see and exit
   -v,  --version                Print version and exit
   -h,  --help                   Show this help
@@ -188,6 +192,7 @@ func main() {
 		BufferCapacity: bufferCapacity,
 		MaxSampleRate:  maxSampleRate,
 		MaxBitDepth:    maxBitDepth,
+		UnpairedAccess: unpairedAccess,
 		Output:         out,
 		DeviceInfo: sendspin.DeviceInfo{
 			ProductName:  "torque", // model

@@ -73,6 +73,15 @@ type V2Config struct {
 	MaxSampleRate  int
 	MaxBitDepth    int
 
+	// UnpairedAccess advertises whether the client admits unpaired servers:
+	// an unpaired (Sentinel-psk) server may open a direct playback session
+	// without pairing. Off by default — a fresh client requires dynamic
+	// pin-code pairing before audio plays. Enable it only for servers that
+	// do not support pairing (or when the operator intentionally skips it);
+	// a server may still choose to pair even when the client admits
+	// unpaired access.
+	UnpairedAccess bool
+
 	// ResolvePSK looks up a pairing record: given the server's psk_id and
 	// psk_category from noise message 1, return the matching PSK (a psk_id
 	// held under a different category is a miss, and the client falls back to
@@ -495,7 +504,7 @@ func (r *ReceiverV2) buildHello() (session.ClientHello, session.PSKCategory) {
 				Formats:     []string{string(session.PairingFormatDigits)},
 			},
 		},
-		UnpairedAccess: session.UnpairedAccess{Enabled: false},
+		UnpairedAccess: session.UnpairedAccess{Enabled: r.config.UnpairedAccess},
 	}
 	cat := r.config.PSKCategory
 	r.stateMu.Lock()
