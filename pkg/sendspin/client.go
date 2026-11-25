@@ -851,7 +851,10 @@ func (r *Receiver) handleUnpair() {
 	if r.config.OnUnpair != nil {
 		r.config.OnUnpair()
 	}
-	_ = r.conn.Close()
+	// Force-close: the goodbye above already told the server we are leaving,
+	// and a graceful close handshake can stall 5s waiting for a peer that has
+	// stopped reading to echo the close frame — stranding readLoop's teardown.
+	r.conn.CloseNow()
 }
 
 // handleServerActivate processes a server/activate received after the initial
@@ -937,7 +940,10 @@ func (r *Receiver) rejectActivate(v session.Verdict) {
 			log.Printf("send goodbye %s: %v", v.Goodbye, err)
 		}
 		log.Printf("server/activate rejected: goodbye %s", v.Goodbye)
-		_ = r.conn.Close()
+		// Force-close: the goodbye above already told the server we are leaving,
+		// and a graceful close handshake can stall 5s waiting for a peer that has
+		// stopped reading to echo the close frame — stranding readLoop's teardown.
+		r.conn.CloseNow()
 		return
 	}
 	if v.PairAbort != "" {

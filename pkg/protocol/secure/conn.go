@@ -364,6 +364,13 @@ func (c *Conn) ReadMessage() (msgType byte, payload []byte, err error) {
 // Close closes the underlying WebSocket.
 func (c *Conn) Close() error { return c.ws.Close(websocket.StatusNormalClosure, "") }
 
+// CloseNow closes the underlying WebSocket immediately, without attempting a
+// close handshake. Prefer this over Close when the peer has been told we are
+// leaving (e.g. a client/goodbye has just been written): a graceful Close
+// waits up to 5s for the peer to echo the close frame, which strands a
+// reader when the peer has already stopped reading.
+func (c *Conn) CloseNow() error { return c.ws.CloseNow() }
+
 func readTextFrame(ws *websocket.Conn, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
